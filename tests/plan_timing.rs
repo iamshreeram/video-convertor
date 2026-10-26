@@ -497,3 +497,31 @@ fn interleave_chunks_cover_every_sample_once_in_time_order() {
     assert_eq!(next, [p.tracks[0].samples.len(), p.tracks[1].samples.len()]);
     assert_eq!(rel, p.mdat_payload_size);
 }
+
+#[test]
+fn codec_delay_is_subtracted_from_audio_block_timestamps() {
+    // Matroska spec: CodecDelay MUST be subtracted from each Block timestamp to get the actual timestamp.
+    // Audio block ts start at 0 with CodecDelay 21.333 ms => actual audio pts start at -21.333 ms (priming),
+    // so the global origin moves to the audio start and the video gets a 21 ms empty edit (what ffmpeg -c copy produces).
+    let v = video(samples_ms(&[0, 40, 80]), Some(40_000_000));
+    let mut a = aac(samples_ms(&[0, 21, 43, 64]));
+    a.codec_delay_ns = Some(21_333_333);
+    let p = plan_of(vec![v, a]).unwrap();
+    let ve = &p.tracks[0].edits;
+    assert_eq!(ve.len(), 2, "{ve:?}");
+    assert_eq!((ve[0].segment_duration, ve[0].media_time), (21, -1));
+    assert_eq!(p.tracks[0].samples[0].dts, 0);
+    let ae = &p.tracks[1].edits;
+    assert_eq!(
+        ae.len(),
+        1,
+        "audio starts at the origin: no empty edit, no trimming"
+    );
+    assert_eq!(ae[0].media_time, 0);
+    assert_eq!(p.tracks[1].samples[0].dts, 0);
+    assert_eq!(p.duration, 21 + 120);
+    // without CodecDelay nothing changes
+    let v = video(samples_ms(&[0, 40, 80]), Some(40_000_000));
+    let p = plan_of(vec![v, aac(samples_ms(&[0, 21, 43, 64]))]).unwrap();
+    assert_eq!(p.tracks[0].edits.len(), 1);
+}

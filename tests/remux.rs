@@ -752,3 +752,26 @@ fn sink_errors_propagate_and_max_output_is_enforced_before_any_write() {
     .unwrap();
     assert_eq!(s.written, full.len());
 }
+
+#[test]
+fn opus_codec_delay_shifts_video_like_ffmpeg() {
+    let mut t = TrackSpec::audio(2, "A_OPUS", opus_head(2, 312, 48000, 0, 0, &[]), 48000.0, 2);
+    t.codec_delay_ns = Some(6_500_000);
+    let mut frames = vec![
+        Frame::new(1, 0, payload(1, 0, 30), true),
+        Frame::new(1, 40, payload(1, 1, 30), false),
+    ];
+    for i in 0..4 {
+        frames.push(Frame::new(2, i * 20, vec![0xF8, 1, 2, 3], true));
+    }
+    frames.sort_by_key(|f| (f.pts_ms, f.track));
+    let (mp4, _) = ok_convert(&build_mkv(&[avc_track(), t], &frames, &MkvOpts::default()));
+    let v = &mp4.tracks[0];
+    assert_eq!(v.edits.len(), 2);
+    assert_eq!(v.edits[0].1, -1);
+    assert!((6..=7).contains(&v.edits[0].0), "{:?}", v.edits);
+    assert_eq!(mp4.tracks[1].edits.len(), 1);
+    let pres = v.presentation_ms();
+    assert!((pres[0] - 6.5).abs() < 1.0, "{pres:?}");
+    assert!(mp4.tracks[1].presentation_ms()[0].abs() < 0.01);
+}

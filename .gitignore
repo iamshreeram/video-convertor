@@ -6,3 +6,5 @@ node_modules
 *.mp4
 .DS_Store
 /dist-node
+e2e/node_modules
+target

@@ -1,0 +1,90 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable, wasm target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry, git checkouts and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Read pinned wasm-bindgen version from Cargo.toml
+        id: wbver
+        run: |
+          VER="$(grep -oP 'wasm-bindgen = "=\K[0-9.]+' Cargo.toml)"
+          if [ -z "$VER" ]; then
+            echo "could not find the pinned wasm-bindgen version in Cargo.toml" >&2
+            exit 1
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "wasm-bindgen pin: $VER"
+
+      - name: Cache wasm-bindgen CLI
+        id: wbcli
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/wasm-bindgen
+          key: wasm-bindgen-cli-${{ steps.wbver.outputs.version }}
+
+      - name: Install wasm-bindgen CLI (cache miss only)
+        if: steps.wbcli.outputs.cache-hit != 'true'
+        run: cargo install wasm-bindgen-cli --version "$VER" --locked
+        env:
+          VER: ${{ steps.wbver.outputs.version }}
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Clippy (library, warnings are errors)
+        run: cargo clippy --lib --locked -- -D warnings
+
+      - name: Build site
+        run: bash scripts/build.sh
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
