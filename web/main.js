@@ -3,7 +3,7 @@
 // Data-state values exposed for tests: init | ready | converting | done | error.
 
 const WINDOW_NOTE_BYTES = 2 * 2 ** 30;
-const CLEANUP_TIMEOUT_MS = 5000;
+const CLEANUP_TIMEOUT_MS = 20000;
 const IDLE_STATES = new Set(["ready", "error"]);
 
 function byId(id) {
@@ -271,11 +271,13 @@ function failWorker(worker, message) {
     return;
   }
   retireWorker();
-  void cleanupSession(false);
+  void cleanupSession(session.runId);
   setError(message);
 }
 
-function cleanupSession(keepNothing) {
+// Asks a cleanup worker to delete this session's outputs with runId <= maxRun.
+// Runs in the background: resolves true when the worker reports "cleaned".
+function cleanupSession(maxRun) {
   return new Promise((resolve) => {
     let worker;
     try {
@@ -297,7 +299,7 @@ function cleanupSession(keepNothing) {
     };
     worker.onerror = () => finish(false);
     worker.onmessageerror = () => finish(false);
-    worker.postMessage({ type: "cleanup", sessionId: session.id, keepNothing });
+    worker.postMessage({ type: "cleanup", sessionId: session.id, maxRun });
   });
 }
 
@@ -340,12 +342,14 @@ async function cancelConversion() {
   if (!session.worker || session.busy) {
     return;
   }
-  session.busy = true;
+  const cancelledRun = session.runId;
   el.cancel.disabled = true;
   retireWorker();
   logLine("Cancelling...");
-  await cleanupSession(false);
-  session.busy = false;
+  // Not awaited: the cancelled run's file may stay locked for a moment after
+  // its worker is terminated, so cleanup retries in the background while the
+  // UI is already back to idle. Only runs <= cancelledRun are targeted.
+  void cleanupSession(cancelledRun);
   el.fileInfo.textContent = "";
   el.sizeNote.hidden = true;
   setProgress(0);
@@ -360,7 +364,7 @@ async function convertAnother() {
   }
   session.busy = true;
   el.again.disabled = true;
-  await cleanupSession(true);
+  await cleanupSession(session.runId);
   releaseResult();
   session.busy = false;
   el.fileInfo.textContent = "";

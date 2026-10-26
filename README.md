@@ -62,11 +62,13 @@ Timing details:
 │   └── wasm.rs                wasm-bindgen export (wasm32 only)
 ├── tests/
 │   ├── common/mod.rs          test-only MKV builder and MP4 parser
-│   ├── scan.rs, plan_timing.rs, mp4_writer.rs, remux.rs
+│   ├── scan.rs, plan_timing.rs, mp4_writer.rs, remux.rs, io_amplification.rs
 ├── web/                       static site source (index.html, main.js, worker.js, style.css)
 ├── scripts/
 │   ├── build.sh               builds dist/ (and dist-node/ with --node)
-│   └── node-smoke.mjs         Node.js smoke converter (development only)
+│   ├── node-smoke.mjs         Node.js smoke converter (development only)
+│   └── validate.sh            compares output against ffmpeg/ffprobe (development only)
+├── e2e/                       headless-Chrome end-to-end test of the built page (development only)
 └── .github/workflows/pages.yml  CI: test, lint, build, deploy to GitHub Pages
 ```
 
@@ -103,6 +105,25 @@ Optional Node.js smoke test (no browser needed):
 bash scripts/build.sh --node
 node scripts/node-smoke.mjs in.mkv out.mp4
 ```
+
+### Validation against ffmpeg and in a real browser (optional, development only)
+
+The unit/integration tests use synthetic MKV files. Two extra tools check real files:
+
+```sh
+# 1. Needs ffmpeg + ffprobe and a directory of .mkv fixtures; converts each file with the
+#    Node build and checks: full decode, stream/packet parity, packet timing, duration,
+#    inter-stream start offsets, decoded video frames (framemd5) and the first second of audio.
+bash scripts/build.sh --node
+bash scripts/validate.sh /path/to/fixtures /path/to/ffmpeg /path/to/ffprobe
+
+# 2. Headless Chrome (playwright-core, uses your installed Chrome) against dist/: OPFS and
+#    in-memory sinks, error handling, several tabs at once, cancel, large files (--big).
+bash scripts/build.sh
+cd e2e && npm install && node browser-smoke.mjs [--big]
+```
+
+The scripts expect `ffmpeg`/`ffprobe` and `fixtures` at the locations given on the command line (see the header of each script).
 
 ## Deploying to GitHub Pages
 

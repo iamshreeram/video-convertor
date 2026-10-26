@@ -2,7 +2,8 @@
 // Dev-only tool: not part of the shipped site. Build first: bash scripts/build.sh
 //
 // Usage: node browser-smoke.mjs [--big]
-//   --big  also run T10 (generates a ~450 MB input; takes several minutes)
+//   --big  also run T9 (cancel mid-conversion) and T10 on one generated ~390 MB input
+//          (generated once per run, deleted at exit; takes several minutes)
 //
 // Env overrides: CHROME_PATH, FFMPEG, FFPROBE.
 // Exit code: 0 when no test FAILs (SKIPs allowed), 1 on any FAIL, 2 on setup error.
@@ -325,6 +326,29 @@ function assertNoIssues(env) {
   );
 }
 
+// Generated once per run (setup), shared by T9 and T10; main() deletes it at exit.
+async function ensureBigInput() {
+  if (fs.existsSync(BIG_IN)) {
+    return;
+  }
+  try {
+    await execFileAsync(
+      FFMPEG,
+      [
+        "-v", "error", "-y",
+        "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30",
+        "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+        "-t", "270", "-c:v", "libx264", "-preset", "ultrafast", "-b:v", "12M",
+        "-c:a", "aac", "-f", "matroska", BIG_IN,
+      ],
+      { timeout: 1500000 },
+    );
+  } catch (err) {
+    fs.rmSync(BIG_IN, { force: true });
+    throw err;
+  }
+}
+
 // ---------- test runner ----------
 
 const results = [];
@@ -539,8 +563,8 @@ async function testT8(env) {
       break;
     }
     assert(
-      s.state === null || s.state === "init",
-      `state ${s.state} before lock callback ran (at ${s.t.toFixed(0)} ms)`,
+      s.state === "init",
+      `state ${s.state} before lock callback ran (at ${s.t.toFixed(0)} ms), expected init`,
     );
     assert(s.disabled, "file input enabled before ready");
     const names = outNames(await opfsNames(page));
@@ -556,13 +580,25 @@ async function testT8(env) {
   return `init held for ${readyAt.toFixed(0)} ms (${samples} samples, no out file); then conversion done`;
 }
 
+// Cancel on the big input. Click #cancel as soon as data-state is 'converting'.
+// (a) UI idle (ready) within 10 s of the click; (b) this session's out-*.mp4 gone
+// within 10 s; (c) next conversion on the same page succeeds; (d) no pageerror.
 async function testT9(env) {
-  const page = await newPage(env);
-  await page.setInputFiles("#file-input", fixture("h264_aac"));
-  const st = await stateOf(page);
-  if (st !== "converting") {
-    skip(`conversion already ${st} before cancel click`);
+  if (!BIG) {
+    skip("--big not given: the 3 s fixture is done before a cancel click can land");
   }
+  const ctx = await newContext(env, lockInit(0));
+  const page = await newPage(env, { context: ctx });
+  const ownPrefix = `out-${await sessionIdOf(page)}-`;
+  const own = async () => (await opfsNames(page)).filter((n) => n.startsWith(ownPrefix));
+
+  await page.setInputFiles("#file-input", BIG_IN);
+  await page.waitForFunction(
+    () => document.documentElement.dataset.state === "converting",
+    null,
+    { timeout: 60000, polling: 20 },
+  );
+  const tClick = Date.now();
   try {
     await page.click("#cancel", { timeout: 3000 });
   } catch (err) {
@@ -572,19 +608,51 @@ async function testT9(env) {
     }
     throw err;
   }
-  const after = await waitForState(page, ["ready", "error", "done"], 15000);
-  assert(after === "ready", `after cancel: state ${after}, expected ready`);
 
-  const deadline = Date.now() + 5000;
-  let names = outNames(await opfsNames(page));
-  while (names.length > 0 && Date.now() < deadline) {
-    await sleep(250);
-    names = outNames(await opfsNames(page));
+  // (a)
+  let after = await stateOf(page);
+  while (!["ready", "error", "done"].includes(after) && Date.now() - tClick < 10000) {
+    await sleep(20);
+    after = await stateOf(page);
   }
-  assert(names.length === 0, `stray out-*.mp4 after cancel: ${names}`);
+  const idleMs = Date.now() - tClick;
+  assert(after === "ready", `(a) after cancel: state ${after} after ${idleMs} ms, expected ready within 10 s`);
 
-  await expectDone(page, await convertFile(page, fixture("h264_aac")));
-  return "cancelled mid-conversion; UI back to ready; no stray OPFS file; next conversion done";
+  // (b) sample every 100 ms for up to 10 s from the click.
+  let names = await own();
+  const presentAtIdle = names.length > 0;
+  let goneMs = presentAtIdle ? null : 0;
+  while (names.length > 0 && Date.now() - tClick < 10000) {
+    await sleep(100);
+    names = await own();
+    if (names.length === 0) {
+      goneMs = Date.now() - tClick;
+    }
+  }
+
+  // (c) runs even if (b) failed, so the observations are complete.
+  let nextErr = null;
+  try {
+    await expectDone(page, await convertFile(page, fixture("h264_aac")));
+  } catch (err) {
+    nextErr = firstLine(err.message);
+  }
+  const lateNames = await own();
+
+  // (d)
+  const pageErrors = env.issues.filter((i) => i.startsWith("pageerror:"));
+  const consoleCount = env.issues.length - pageErrors.length;
+  const bNote =
+    goneMs === null ? "own out file still present at 10 s" : `own out file gone ${goneMs} ms after click (present at idle: ${presentAtIdle})`;
+  const cNote = lateNames.length > 0 ? "own out file still present after next conversion" : "no own out file after next conversion";
+  console.log(
+    `T9 observations: cancel->ready ${idleMs} ms; ${bNote}; ${cNote}; next conversion ${nextErr ? `FAILED (${nextErr})` : "done"}; console msgs ${consoleCount}; pageerrors ${pageErrors.length}`,
+  );
+
+  assert(goneMs !== null, `(b) own out-*.mp4 still in OPFS 10 s after cancel: ${names}`);
+  assert(nextErr === null, `(c) next conversion on same page failed: ${nextErr}`);
+  assert(pageErrors.length === 0, `(d) uncaught page errors: ${pageErrors.slice(0, 2).join(" | ")}`);
+  return `(a) idle ${idleMs} ms after click; (b) ${bNote}; (c) next conversion done; (d) 0 pageerrors`;
 }
 
 async function testT10(env) {
@@ -592,19 +660,7 @@ async function testT10(env) {
     skip("--big not given");
   }
   try {
-    if (!fs.existsSync(BIG_IN)) {
-      await execFileAsync(
-        FFMPEG,
-        [
-          "-v", "error", "-y",
-          "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30",
-          "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
-          "-t", "270", "-c:v", "libx264", "-preset", "ultrafast", "-b:v", "12M",
-          "-c:a", "aac", "-f", "matroska", BIG_IN,
-        ],
-        { timeout: 1500000 },
-      );
-    }
+    await ensureBigInput();
     const inSize = fs.statSync(BIG_IN).size;
     const page = await newPage(env);
     const started = Date.now();
@@ -620,9 +676,7 @@ async function testT10(env) {
     assertNoIssues(env);
     return `input ${(inSize / 2 ** 20).toFixed(0)} MiB, output ${(outSize / 2 ** 20).toFixed(0)} MiB, wall ${wallSecs.toFixed(1)} s, duration drift ${drift.toFixed(3)} s`;
   } finally {
-    for (const file of [BIG_IN, BIG_OUT]) {
-      fs.rmSync(file, { force: true });
-    }
+    fs.rmSync(BIG_OUT, { force: true });
   }
 }
 
@@ -648,11 +702,21 @@ async function main() {
   ROOT = `http://127.0.0.1:${port}/`;
   SUB = `http://127.0.0.1:${port}${PREFIX}/`;
   try {
+    if (BIG) {
+      await ensureBigInput();
+    }
     browser = await chromium.launch({ executablePath: CHROME, headless: true });
     console.log(`Chrome ${browser.version()} (${CHROME}); server ${ROOT} and ${SUB}`);
 
     await runTest("T1", "OPFS convert h264_aac at sub-path", 300000, async (env) => {
-      const page = await newPage(env, { url: SUB });
+      // Lock callback delayed 1 s so the init state is observable right after load.
+      const ctx = await newContext(env, lockInit(1000));
+      const page = await ctx.newPage();
+      watchPage(page, env.issues);
+      await page.goto(SUB, { waitUntil: "load" });
+      const initial = await stateOf(page);
+      assert(initial === "init", `state right after load is ${initial}, expected init`);
+      await waitForState(page, ["ready"], 30000);
       const state = await convertFile(page, fixture("h264_aac"));
       await expectDone(page, state);
       env.page = page;
@@ -676,6 +740,10 @@ async function main() {
       await browser.close().catch(() => {});
     }
     await new Promise((resolve) => server.close(resolve));
+    if (BIG) {
+      fs.rmSync(BIG_IN, { force: true });
+      fs.rmSync(BIG_OUT, { force: true });
+    }
   }
 
   const count = (status) => results.filter((r) => r.status === status).length;

@@ -1,6 +1,6 @@
 // Module worker: runs the Rust/WASM remuxer off the main thread.
 // Messages in:  {type:"convert", file, sessionId, sweep, runId, inMemory}
-//               {type:"cleanup", sessionId, keepNothing}
+//               {type:"cleanup", sessionId, maxRun}
 // Messages out: {type:"progress", fraction}
 //               {type:"done", file, summary, outputName}
 //               {type:"error", message}
@@ -10,6 +10,8 @@ import init, { convert_mkv_to_mp4 } from "./pkg/mkv2mp4.js";
 const MEMORY_CAP_BYTES = 1.5 * 2 ** 30;
 const PROGRESS_INTERVAL_MS = 100;
 const OUTPUT_NAME_PATTERN = /^out-(.+)-(\d+)\.mp4$/;
+const CLEANUP_RETRY_MS = 150;
+const CLEANUP_DEADLINE_MS = 15000;
 
 let wasmReady = null;
 
@@ -94,21 +96,61 @@ async function runConvert(msg) {
   }
 }
 
+// Removes this session's outputs with runId <= msg.maxRun. A file may still be
+// locked by a worker that was just terminated (its handle is released
+// asynchronously), so failed removals are retried until the deadline.
 async function runCleanup(msg) {
+  const removed = [];
+  const failed = [];
   try {
     const root = await getOpfsRoot();
     if (root) {
+      const targets = [];
       for (const name of await listOutputNames(root)) {
-        if (parseOutputName(name)?.sessionId === msg.sessionId) {
-          await removeQuietly(root, name);
+        const parsed = parseOutputName(name);
+        if (parsed && parsed.sessionId === msg.sessionId && Number(parsed.runId) <= msg.maxRun) {
+          targets.push(name);
         }
       }
+      await removeWithRetry(root, targets, removed, failed);
     }
   } catch {
     // Cleanup is best effort and must never fail a conversion.
   }
-  postMessage({ type: "cleaned" });
+  postMessage({ type: "cleaned", removed, failed });
   self.close();
+}
+
+async function removeWithRetry(root, names, removed, failed) {
+  const deadline = Date.now() + CLEANUP_DEADLINE_MS;
+  let pending = names;
+  while (pending.length > 0) {
+    const stillPending = [];
+    for (const name of pending) {
+      const outcome = await tryRemove(root, name);
+      if (outcome === "removed") {
+        removed.push(name);
+      } else if (outcome === "busy") {
+        stillPending.push(name);
+      }
+    }
+    pending = stillPending;
+    if (pending.length === 0 || Date.now() >= deadline) {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, CLEANUP_RETRY_MS));
+  }
+  failed.push(...pending);
+}
+
+// Returns "removed", "missing" (already gone) or "busy" (retry later).
+async function tryRemove(root, name) {
+  try {
+    await root.removeEntry(name);
+    return "removed";
+  } catch (err) {
+    return err && err.name === "NotFoundError" ? "missing" : "busy";
+  }
 }
 
 function makeOutputName(name) {
