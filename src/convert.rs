@@ -1,7 +1,7 @@
 //! Top-level conversion pipeline: scan -> plan -> header check -> write.
 
 use crate::error::{Error, Result};
-use crate::mkv::{scan, Mkv, TrackKind};
+use crate::mkv::{scan, Mkv, TrackKind, READ_MAX_WINDOW, READ_MIN_WINDOW};
 use crate::mp4::{build_header, write_mp4};
 use crate::plan::{build_plan, Plan};
 use crate::source::{BufferedSource, Sink, Source};
@@ -85,7 +85,8 @@ fn analyze<S: Source>(src: &mut S, scan_progress: &mut dyn FnMut(u64, u64)) -> R
     let mkv = scan(&mut *src, scan_progress)?;
     // Plan phase: only tiny header reads, so a small adaptive window suffices.
     let plan = {
-        let mut plan_src = BufferedSource::new_adaptive(&mut *src, 4096, 1 << 20);
+        let mut plan_src =
+            BufferedSource::new_adaptive(&mut *src, READ_MIN_WINDOW, READ_MAX_WINDOW);
         build_plan(&mkv, &mut plan_src)?
     };
     let total_size = build_header(&plan)?.total_size;

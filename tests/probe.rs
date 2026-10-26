@@ -290,7 +290,8 @@ fn probe_is_cheap_on_large_frames_and_writes_nothing() {
     assert!(p.output_size > 8_000_000);
     let ratio = bytes.get() as f64 / mkv.len() as f64;
     assert!(
-        ratio <= 0.25,
+        // Spec change (F4): 64 KiB minimum read window trades bytes for far fewer browser IPC calls.
+        ratio <= 0.4,
         "probe must only read headers, read {ratio:.2}x of the file"
     );
     // a Sink-less API: nothing to assert about writes except that probe compiles without one

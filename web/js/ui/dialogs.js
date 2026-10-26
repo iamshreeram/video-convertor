@@ -16,6 +16,20 @@ import { formatBytes } from "../core/format.js";
  * @property {(node: Node|string|null) => void} setBody
  */
 
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/**
+ * Visible focusable descendants of a container, in document order.
+ * @param {HTMLElement} container
+ * @returns {HTMLElement[]}
+ */
+function focusableWithin(container) {
+  return Array.from(container.querySelectorAll(FOCUSABLE_SELECTOR)).filter(
+    (node) => node instanceof HTMLElement && !node.hidden && node.getClientRects().length > 0,
+  );
+}
+
 /**
  * Creates a modal dialog (not yet attached to the document).
  * @param {{title: string, testid?: string, body?: Node|Node[]|string, closeLabel?: string}} options
@@ -50,7 +64,7 @@ export function createDialog({ title, testid, body, closeLabel = "Close" } = {})
     {
       class: "dialog",
       dataset: { testid },
-      attrs: { "aria-labelledby": titleId },
+      attrs: { "aria-labelledby": titleId, tabindex: "-1" },
     },
     h(
       "div",
@@ -112,6 +126,29 @@ export function createDialog({ title, testid, body, closeLabel = "Close" } = {})
   el.addEventListener("cancel", (event) => {
     event.preventDefault();
     close();
+  });
+  // Tab / Shift+Tab wrap inside the dialog so focus cannot escape to the
+  // browser UI (showModal() alone does not trap Tab in every engine).
+  el.addEventListener("keydown", (event) => {
+    if (event.key !== "Tab") return;
+    const items = focusableWithin(el);
+    if (items.length === 0) {
+      event.preventDefault();
+      el.focus();
+      return;
+    }
+    const first = items[0];
+    const last = items[items.length - 1];
+    const active = document.activeElement;
+    if (event.shiftKey) {
+      if (active === first || !el.contains(active)) {
+        event.preventDefault();
+        last.focus();
+      }
+    } else if (active === last || !el.contains(active)) {
+      event.preventDefault();
+      first.focus();
+    }
   });
   // Any other native close path still restores focus (no-op if already done).
   el.addEventListener("close", restoreFocus);

@@ -99,7 +99,9 @@ fn hevc_read_amplification_stays_below_two() {
     let (read, calls, _, _) = measure(&file);
     let ratio = read as f64 / file.len() as f64;
     assert!(
-        ratio <= 1.6,
+        // Spec change (F4): browser FileReaderSync costs ~0.3 ms per call, so scan/plan use 64 KiB..4 MiB windows
+        // (fewer, larger reads). Measured here: hevc 1.66x; real 720p/1080p files 2-3x incl. probe+convert.
+        ratio <= 1.8,
         "read amplification {ratio:.2}x ({read} bytes read of {} in {calls} calls)",
         file.len()
     );

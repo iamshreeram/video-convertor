@@ -103,9 +103,19 @@ pub fn scan_with_limits<S: Source>(
 
 // ------------------------------------------------------------------ constants
 
-/// Read-ahead window bounds for header reads: small after a jump, growing while sequential.
-const READ_MIN_WINDOW: usize = 4096;
-const READ_MAX_WINDOW: usize = 1 << 20;
+/// Read-ahead window bounds for the scan and plan phases (convert.rs uses the same pair).
+/// Browser measurements (F4, Chrome, median of 2, 389 MiB 720p H.264 `big` and 608 MB
+/// 1080p 80 Mbps `huge`); analysis = scan+plan, convert = whole convert call:
+///   window                 big analysis/convert  huge analysis/convert  huge read amp
+///   4 KiB..1 MiB (old)     2.6 s / 3.4 s         0.49 s / 2.6 s         1.90x
+///   64 KiB..4 MiB (chosen) 0.41 s / 1.27 s       0.62 s / 2.42 s        2.19x
+///   256 KiB..4 MiB         0.47 s / 1.51 s       0.46 s / 2.75 s        3.82x
+///   fixed 1 MiB            0.51 s / 1.51 s       0.58 s / 2.41 s        3.86x
+///   fixed 4 MiB            0.38 s / 1.33 s       0.51 s / 2.18 s        3.88x
+/// At 4 KiB the per-call FileReaderSync cost (~0.28 ms, ~15 MB/s) dominated analysis.
+/// 64 KiB..4 MiB keeps reads large while sequential and stays well under the 4x cap.
+pub(crate) const READ_MIN_WINDOW: usize = 64 * 1024;
+pub(crate) const READ_MAX_WINDOW: usize = 4 << 20;
 /// Progress is reported at most once per this many bytes of file position.
 const PROGRESS_STEP: u64 = 1 << 20;
 /// Maximum number of simultaneously open containers.

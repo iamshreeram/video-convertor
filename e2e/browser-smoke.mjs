@@ -823,6 +823,27 @@ async function testT5(env) {
   return summary.join("; ");
 }
 
+// True when the blob URL loads metadata in a detached <video> (5 s cap).
+async function blobLoads(page, url) {
+  return page.evaluate(
+    (u) =>
+      new Promise((resolve) => {
+        const video = document.createElement("video");
+        const finish = (ok) => {
+          video.removeAttribute("src");
+          video.load();
+          resolve(ok);
+        };
+        video.preload = "metadata";
+        video.onloadedmetadata = () => finish(true);
+        video.onerror = () => finish(false);
+        setTimeout(() => finish(false), 5000);
+        video.src = u;
+      }),
+    url,
+  );
+}
+
 async function testT6(env) {
   const page = await openApp(env, { url: shared.root });
   const { pick, state } = await convertOne(page, fixture("h264_aac"));
@@ -830,15 +851,11 @@ async function testT6(env) {
   const card = cardOf(page, pick);
   const href = await card.locator(testid("job-download")).getAttribute("href");
   assert(href && href.startsWith("blob:"), `download href is not blob: (${href})`);
-  const control = await page.evaluate(async (u) => {
-    try {
-      const response = await fetch(u);
-      return response.ok;
-    } catch {
-      return false;
-    }
-  }, href);
-  assert(control, "control fetch of the live blob URL failed; revocation cannot be proven");
+  // The app CSP has connect-src 'self' (no blob:), so fetch() of a blob URL is
+  // always blocked and cannot prove liveness. media-src allows blob:, so a
+  // detached <video> is the probe: it loads metadata only while the URL is live.
+  const control = await blobLoads(page, href);
+  assert(control, "control: live blob URL did not load in a <video> element; revocation cannot be proven");
   assert((await opfsOutNames(page)).length === 1, "expected one OPFS output before remove");
 
   await card.locator(testid("job-remove")).click();
@@ -852,15 +869,8 @@ async function testT6(env) {
     5000,
     "OPFS output of the removed card still present after 5 s",
   );
-  const revoked = await page.evaluate(async (u) => {
-    try {
-      await fetch(u);
-      return false;
-    } catch {
-      return true;
-    }
-  }, href);
-  assert(revoked, "old blob URL is still fetchable after remove");
+  const revoked = !(await blobLoads(page, href));
+  assert(revoked, "old blob URL still loads in a <video> element after remove");
 
   await addFiles(page, [fixture("h264_opus"), fixture("h264_mp3")]);
   await waitCard(page, { name: "h264_opus.mkv" }, ["done"]);
@@ -1438,8 +1448,22 @@ async function testT19a(env) {
   if (!running.includes(state)) {
     skip("first conversion finished before the cancel could land (run with --big)");
   }
-  await cardOf(page, { index: 0 }).locator(testid("job-cancel")).click();
-  await waitCard(page, { index: 0 }, ["cancelled"], 5000, 50);
+  // Without --big the small first file may finish before Cancel is clickable
+  // (the button then disappears). Only that case may skip, and only without --big.
+  const cancelBtn = cardOf(page, { index: 0 }).locator(testid("job-cancel"));
+  const clicked = await cancelBtn.click({ timeout: 2000 }).then(
+    () => true,
+    () => false,
+  );
+  const landed = clicked
+    ? await waitCard(page, { index: 0 }, ["cancelled", "done", "error"], 5000, 50)
+    : await stateOfPick(page, { index: 0 });
+  if (landed !== "cancelled") {
+    if (!BIG && (landed === "done" || landed === "error")) {
+      skip("first conversion finished before the cancel could land (run with --big)");
+    }
+    throw new Error(`cancel did not land on ${firstName} (card is ${landed})`);
+  }
   await waitCard(page, { name: "h264_opus.mkv" }, ["done"]);
   await waitCard(page, { name: "h264_mp3.mkv" }, ["done"]);
   assert(await cardCount(page) === 3, "the cancelled card vanished before it was removed");
