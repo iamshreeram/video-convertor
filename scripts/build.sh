@@ -59,6 +59,8 @@ touch dist/.nojekyll
 if [ "$build_node" -eq 1 ]; then
   rm -rf dist-node
   wasm-bindgen "$wasm_in" --target nodejs --out-dir dist-node --out-name mkv2mp4 --no-typescript
+  # The repo root may gain a "type": "module" package.json; pin this directory to CommonJS.
+  printf '%s' '{"type":"commonjs"}' > dist-node/package.json
 fi
 
 echo "build.sh: wasm size: $(wc -c < dist/pkg/mkv2mp4_bg.wasm) bytes"

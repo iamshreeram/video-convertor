@@ -42,19 +42,16 @@ pub fn convert<S: Source, K: Sink>(
     };
     reporter.report(0.0);
 
-    // scan wraps the source in its own adaptive window; no extra layer here.
-    let mkv = scan(&mut src, &mut |pos, len| {
+    let Analysis {
+        mkv,
+        plan,
+        total_size,
+    } = analyze(&mut src, &mut |pos, len| {
         reporter.report(scan_fraction(pos, len))
     })?;
-    // Plan phase: only tiny header reads, so a small adaptive window suffices.
-    let plan = {
-        let mut plan_src = BufferedSource::new_adaptive(&mut src, 4096, 1 << 20);
-        build_plan(&mkv, &mut plan_src)?
-    };
 
-    // Exact size check before anything reaches the sink. The header is rebuilt inside
-    // write_mp4; only the size is kept here so the two copies never coexist.
-    let total_size = build_header(&plan)?.total_size;
+    // Exact size check before anything reaches the sink. (The header is rebuilt inside
+    // write_mp4; only its size is kept, so the two copies never coexist.)
     if let Some(limit) = opts.max_output_bytes {
         if total_size > limit {
             return Err(Error::TooLarge(format!(
@@ -71,6 +68,93 @@ pub fn convert<S: Source, K: Sink>(
     reporter.report(1.0);
 
     build_report(mkv, &plan, output_size)
+}
+
+/// Result of the scan and plan phases; nothing has been written yet.
+struct Analysis {
+    mkv: Mkv,
+    plan: Plan,
+    /// Exact size of the MP4 that `write_mp4` will produce.
+    total_size: u64,
+}
+
+/// Scan and plan phases, shared by `convert` and `probe` so the two cannot drift.
+/// Reads only; writes nothing.
+fn analyze<S: Source>(src: &mut S, scan_progress: &mut dyn FnMut(u64, u64)) -> Result<Analysis> {
+    // scan wraps the source in its own adaptive window; no extra layer here.
+    let mkv = scan(&mut *src, scan_progress)?;
+    // Plan phase: only tiny header reads, so a small adaptive window suffices.
+    let plan = {
+        let mut plan_src = BufferedSource::new_adaptive(&mut *src, 4096, 1 << 20);
+        build_plan(&mkv, &mut plan_src)?
+    };
+    let total_size = build_header(&plan)?.total_size;
+    Ok(Analysis {
+        mkv,
+        plan,
+        total_size,
+    })
+}
+
+/// One selected output track, as reported by `probe`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrackReport {
+    pub kind: TrackKind,
+    /// Plan codec name, e.g. "h264", "aac".
+    pub codec: String,
+    /// Display dimensions; 0 for audio.
+    pub width: u32,
+    pub height: u32,
+    /// 0 for video.
+    pub channels: u32,
+    /// 0 for video.
+    pub sample_rate: u32,
+    pub language: String,
+    pub sample_count: u64,
+}
+
+/// Describes what `convert` would produce for an input, without producing it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProbeReport {
+    /// Selected tracks in output order (video first).
+    pub tracks: Vec<TrackReport>,
+    pub duration_ms: u64,
+    /// Exact bytes `convert` would write.
+    pub output_size: u64,
+    /// Scan warnings followed by plan warnings, as in `ConvertReport`.
+    pub warnings: Vec<String>,
+}
+
+/// Scans and plans `src` exactly as `convert` does, but writes nothing.
+/// Fails with the same errors `convert` would fail with for the same input.
+pub fn probe<S: Source>(mut src: S) -> Result<ProbeReport> {
+    let Analysis {
+        mkv,
+        plan,
+        total_size,
+    } = analyze(&mut src, &mut |_, _| {})?;
+    let tracks = plan
+        .tracks
+        .iter()
+        .map(|t| TrackReport {
+            kind: t.kind,
+            codec: t.codec_name.clone(),
+            width: t.width,
+            height: t.height,
+            channels: t.channels,
+            sample_rate: t.sample_rate,
+            language: t.language.clone(),
+            sample_count: t.samples.len() as u64,
+        })
+        .collect();
+    let mut warnings = mkv.warnings;
+    warnings.extend(plan.warnings.iter().cloned());
+    Ok(ProbeReport {
+        tracks,
+        duration_ms: plan.duration,
+        output_size: total_size,
+        warnings,
+    })
 }
 
 /// Forwards progress to the caller. Values are clamped to [0, 1] and any value that is not

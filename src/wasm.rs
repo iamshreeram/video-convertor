@@ -7,13 +7,21 @@
 
 use wasm_bindgen::prelude::*;
 
-use crate::convert::{convert, ConvertOptions};
+use crate::convert::{convert, probe, ConvertOptions};
 use crate::error::{Error, Result as CrateResult};
-use crate::json::report_to_json;
+use crate::json::{probe_to_json, report_to_json};
 use crate::source::{Sink, Source};
 
 /// Largest integer that an f64 represents exactly (2^53).
 const MAX_SAFE_FILE_SIZE: f64 = 9_007_199_254_740_992.0;
+
+/// Validates a JS-supplied file size and converts it to bytes.
+fn validated_file_size(file_size: f64) -> Result<u64, JsError> {
+    if !file_size.is_finite() || !(0.0..=MAX_SAFE_FILE_SIZE).contains(&file_size) {
+        return Err(JsError::new("invalid file size"));
+    }
+    Ok(file_size as u64)
+}
 
 /// Crate version, e.g. "0.1.0".
 #[wasm_bindgen]
@@ -33,16 +41,14 @@ pub fn convert_mkv_to_mp4(
     write: &js_sys::Function,
     progress: &js_sys::Function,
 ) -> Result<String, JsError> {
-    if !file_size.is_finite() || !(0.0..=MAX_SAFE_FILE_SIZE).contains(&file_size) {
-        return Err(JsError::new("invalid file size"));
-    }
+    let len = validated_file_size(file_size)?;
     let max_output = if max_output_bytes.is_finite() && max_output_bytes > 0.0 {
         Some(max_output_bytes as u64)
     } else {
         None
     };
     let source = JsSource {
-        len: file_size as u64,
+        len,
         read: read.clone(),
     };
     let mut sink = JsSink {
@@ -57,6 +63,21 @@ pub fn convert_mkv_to_mp4(
     };
     match convert(source, &mut sink, &options, &mut report_progress) {
         Ok(report) => Ok(report_to_json(&report)),
+        Err(e) => Err(JsError::new(&e.to_string())),
+    }
+}
+
+/// Probes an MKV file (accessed through JS callbacks) without writing any output.
+/// Returns the probe JSON; errors are surfaced as their display text.
+#[wasm_bindgen]
+pub fn probe_mkv(file_size: f64, read: &js_sys::Function) -> Result<String, JsError> {
+    let len = validated_file_size(file_size)?;
+    let source = JsSource {
+        len,
+        read: read.clone(),
+    };
+    match probe(source) {
+        Ok(report) => Ok(probe_to_json(&report)),
         Err(e) => Err(JsError::new(&e.to_string())),
     }
 }

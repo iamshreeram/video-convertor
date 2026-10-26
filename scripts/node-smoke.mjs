@@ -1,5 +1,6 @@
 // Dev-only smoke test for the wasm converter under Node.js.
 // Usage: node scripts/node-smoke.mjs <in.mkv> <out.mp4> [--max-output=<bytes>] [--verbose]
+//        node scripts/node-smoke.mjs --probe <in.mkv>   (prints probe JSON; no output file)
 // Requires `bash scripts/build.sh --node` first (loads dist-node/mkv2mp4.js).
 
 import { createRequire } from "node:module";
@@ -15,6 +16,7 @@ function parseArgs(argv) {
   const positional = [];
   let maxOutput = -1;
   let verbose = false;
+  let probe = false;
   for (const arg of argv) {
     if (arg.startsWith("--max-output=")) {
       maxOutput = Number(arg.slice("--max-output=".length));
@@ -23,16 +25,23 @@ function parseArgs(argv) {
       }
     } else if (arg === "--verbose") {
       verbose = true;
+    } else if (arg === "--probe") {
+      probe = true;
     } else if (arg.startsWith("--")) {
       throw new Error(`unknown option: ${arg}`);
     } else {
       positional.push(arg);
     }
   }
-  if (positional.length !== 2) {
+  if (probe) {
+    // In probe mode the output path is not needed; a second positional is ignored.
+    if (positional.length < 1 || positional.length > 2) {
+      throw new Error("usage: node scripts/node-smoke.mjs --probe <in.mkv>");
+    }
+  } else if (positional.length !== 2) {
     throw new Error("usage: node scripts/node-smoke.mjs <in.mkv> <out.mp4> [--max-output=<bytes>] [--verbose]");
   }
-  return { inPath: positional[0], outPath: positional[1], maxOutput, verbose };
+  return { inPath: positional[0], outPath: positional[1], maxOutput, verbose, probe };
 }
 
 // Reads exactly `length` bytes at `offset`, looping over short reads.
@@ -62,13 +71,18 @@ function makeWriter(fd) {
 }
 
 function main() {
-  const { inPath, outPath, maxOutput, verbose } = parseArgs(process.argv.slice(2));
-  const { convert_mkv_to_mp4 } = require(wasmModulePath);
+  const { inPath, outPath, maxOutput, verbose, probe } = parseArgs(process.argv.slice(2));
+  const { convert_mkv_to_mp4, probe_mkv } = require(wasmModulePath);
 
   const inFd = fs.openSync(inPath, "r");
   let outFd = null;
   try {
     const size = fs.fstatSync(inFd).size;
+    if (probe) {
+      const probeJson = probe_mkv(size, makeReader(inFd));
+      process.stdout.write(`${JSON.stringify(JSON.parse(probeJson), null, 2)}\n`);
+      return;
+    }
     outFd = fs.openSync(outPath, "w");
     const progress = (fraction) => {
       if (verbose) {
