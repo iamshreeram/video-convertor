@@ -1,7 +1,15 @@
 //! Top-level conversion pipeline: scan -> plan -> header check -> write.
 
-use crate::error::Result;
-use crate::source::{Sink, Source};
+use crate::error::{Error, Result};
+use crate::mkv::{scan, Mkv, TrackKind};
+use crate::mp4::{build_header, write_mp4};
+use crate::plan::{build_plan, Plan};
+use crate::source::{BufferedSource, Sink, Source};
+
+/// Read-ahead window wrapped around the input source.
+const READ_WINDOW_BYTES: usize = 4 << 20;
+/// Share of the progress range taken by the scan phase; the write phase takes the rest.
+const SCAN_SHARE: f64 = 0.3;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ConvertOptions {
@@ -23,10 +31,134 @@ pub struct ConvertReport {
 
 /// Converts `src` (MKV) to MP4 written into `sink`. `progress` is monotone in [0,1], ends at 1.0 on success.
 pub fn convert<S: Source, K: Sink>(
-    _src: S,
-    _sink: &mut K,
-    _opts: &ConvertOptions,
-    _progress: &mut dyn FnMut(f64),
+    src: S,
+    sink: &mut K,
+    opts: &ConvertOptions,
+    progress: &mut dyn FnMut(f64),
 ) -> Result<ConvertReport> {
-    todo!("S5")
+    let mut input = BufferedSource::new(src, READ_WINDOW_BYTES);
+    let mut reporter = Progress {
+        last: f64::NEG_INFINITY,
+        inner: progress,
+    };
+    reporter.report(0.0);
+
+    let mkv = scan(&mut input, &mut |pos, len| {
+        reporter.report(scan_fraction(pos, len))
+    })?;
+    let plan = build_plan(&mkv, &mut input)?;
+
+    // Exact size check before anything reaches the sink. The header is rebuilt inside
+    // write_mp4; only the size is kept here so the two copies never coexist.
+    let total_size = build_header(&plan)?.total_size;
+    if let Some(limit) = opts.max_output_bytes {
+        if total_size > limit {
+            return Err(Error::TooLarge(format!(
+                "output would be {total_size} bytes, limit is {limit}"
+            )));
+        }
+    }
+
+    let output_size = write_mp4(&plan, &mut input, sink, &mut |done, total| {
+        reporter.report(write_fraction(done, total))
+    })?;
+    reporter.report(1.0);
+
+    build_report(mkv, &plan, output_size)
+}
+
+/// Forwards progress to the caller. Values are clamped to [0, 1] and any value that is not
+/// above the last one sent is dropped, so the reported sequence never goes backwards.
+struct Progress<'a> {
+    last: f64,
+    inner: &'a mut dyn FnMut(f64),
+}
+
+impl Progress<'_> {
+    fn report(&mut self, value: f64) {
+        if value.is_nan() {
+            return;
+        }
+        let clamped = value.clamp(0.0, 1.0);
+        if clamped > self.last {
+            self.last = clamped;
+            (self.inner)(clamped);
+        }
+    }
+}
+
+fn scan_fraction(pos: u64, len: u64) -> f64 {
+    if len == 0 {
+        SCAN_SHARE
+    } else {
+        SCAN_SHARE * (pos as f64 / len as f64)
+    }
+}
+
+fn write_fraction(done: u64, total: u64) -> f64 {
+    if total == 0 {
+        SCAN_SHARE
+    } else {
+        SCAN_SHARE + (1.0 - SCAN_SHARE) * (done as f64 / total as f64)
+    }
+}
+
+fn build_report(mkv: Mkv, plan: &Plan, output_size: u64) -> Result<ConvertReport> {
+    let video_codec = plan
+        .tracks
+        .iter()
+        .find(|t| t.kind == TrackKind::Video)
+        .map(|t| t.codec_name.clone());
+    let audio_codecs = plan
+        .tracks
+        .iter()
+        .filter(|t| t.kind == TrackKind::Audio)
+        .map(|t| t.codec_name.clone())
+        .collect();
+    let sample_count = plan.tracks.iter().try_fold(0u64, |acc, t| {
+        acc.checked_add(t.samples.len() as u64)
+            .ok_or_else(|| Error::TooLarge("sample count overflow".into()))
+    })?;
+    let mut warnings = mkv.warnings;
+    warnings.extend(plan.warnings.iter().cloned());
+    Ok(ConvertReport {
+        warnings,
+        video_codec,
+        audio_codecs,
+        duration_ms: plan.duration,
+        sample_count,
+        output_size,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_starts_at_zero_is_clamped_and_never_goes_back() {
+        let mut seen: Vec<f64> = Vec::new();
+        let mut sink = |v: f64| seen.push(v);
+        let mut reporter = Progress {
+            last: f64::NEG_INFINITY,
+            inner: &mut sink,
+        };
+        reporter.report(0.0);
+        reporter.report(0.5);
+        reporter.report(0.2);
+        reporter.report(f64::NAN);
+        reporter.report(1.7);
+        reporter.report(1.0);
+        drop(reporter);
+        assert_eq!(seen, vec![0.0, 0.5, 1.0]);
+    }
+
+    #[test]
+    fn phase_fractions_map_into_their_ranges() {
+        assert_eq!(scan_fraction(0, 0), SCAN_SHARE);
+        assert_eq!(scan_fraction(5, 10), 0.15);
+        assert_eq!(write_fraction(0, 0), SCAN_SHARE);
+        assert!(write_fraction(10, 10) >= 0.999_999);
+        assert_eq!(write_fraction(0, 10), SCAN_SHARE);
+    }
 }

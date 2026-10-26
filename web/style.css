@@ -1,0 +1,379 @@
+/* MKV to MP4 converter: page styles (no external resources). */
+
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --text: #1c1f24;
+  --muted: #5b6370;
+  --accent: #0b6bcb;
+  --accent-text: #ffffff;
+  --border: #c9ced6;
+  --drop-bg: #eef4fb;
+  --drop-active: #d6e7fb;
+  --error-bg: #fdecec;
+  --error-text: #8a1c1c;
+  --note-bg: #fff6df;
+  --note-text: #5c4300;
+  --progress-track: #dfe3ea;
+  --focus: #ffb300;
+  --radius: 10px;
+  --gap: 1rem;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171c;
+    --surface: #1e232b;
+    --text: #e7eaf0;
+    --muted: #9aa3b2;
+    --accent: #5aa9ff;
+    --accent-text: #0b1420;
+    --border: #3a414d;
+    --drop-bg: #1a2230;
+    --drop-active: #223352;
+    --error-bg: #3a1d1d;
+    --error-text: #ffb4b4;
+    --note-bg: #3a3118;
+    --note-text: #ffe6a6;
+    --progress-track: #2f3640;
+    --focus: #ffd54f;
+  }
+}
+
+[hidden] {
+  display: none !important;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+}
+
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.skip-link {
+  position: absolute;
+  left: 0.5rem;
+  top: -3rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--surface);
+  color: var(--text);
+  border-radius: var(--radius);
+  z-index: 10;
+}
+
+.skip-link:focus {
+  top: 0.5rem;
+}
+
+.site-header,
+.wrap,
+.site-footer {
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 0 1rem;
+}
+
+.site-header {
+  padding-top: 2rem;
+}
+
+.site-header h1 {
+  margin: 0 0 0.5rem;
+  font-size: clamp(1.5rem, 4vw, 2rem);
+}
+
+.intro {
+  margin: 0 0 1.5rem;
+  color: var(--muted);
+}
+
+.wrap {
+  flex: 1;
+  display: grid;
+  gap: var(--gap);
+  padding-bottom: 2rem;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.25rem;
+}
+
+.card h2 {
+  margin: 0 0 0.75rem;
+  font-size: 1.15rem;
+}
+
+.card:focus {
+  outline: none;
+}
+
+.notice,
+.note,
+.error {
+  border-radius: var(--radius);
+  padding: 0.75rem 1rem;
+  margin: 0 0 var(--gap);
+}
+
+.notice {
+  background: var(--error-bg);
+  color: var(--error-text);
+}
+
+.note {
+  background: var(--note-bg);
+  color: var(--note-text);
+  font-size: 0.95rem;
+}
+
+.error {
+  background: var(--error-bg);
+  color: var(--error-text);
+  margin-bottom: 0;
+}
+
+.error:empty {
+  display: none;
+}
+
+/* Drop zone */
+
+.drop-zone {
+  border: 2px dashed var(--border);
+  border-radius: var(--radius);
+  background: var(--drop-bg);
+  padding: 1.5rem 1rem;
+  text-align: center;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.drop-zone p {
+  margin: 0 0 0.75rem;
+  color: var(--muted);
+}
+
+.drop-zone.dragover {
+  background: var(--drop-active);
+  border-color: var(--accent);
+}
+
+.drop-zone.disabled {
+  opacity: 0.6;
+}
+
+input[type="file"] {
+  max-width: 100%;
+  font: inherit;
+  color: var(--text);
+}
+
+input[type="file"]::file-selector-button {
+  font: inherit;
+  padding: 0.5rem 0.9rem;
+  margin-right: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+
+input[type="file"]:disabled {
+  opacity: 0.6;
+}
+
+.file-info {
+  margin: 0.75rem 0 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  min-height: 1.5em;
+}
+
+.codecs {
+  margin-top: 1rem;
+}
+
+.codecs summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.codecs ul {
+  margin: 0.5rem 0 0;
+  padding-left: 1.25rem;
+}
+
+.codecs li {
+  margin-bottom: 0.35rem;
+}
+
+/* Progress */
+
+.progress-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+progress {
+  flex: 1 1 200px;
+  width: 100%;
+  height: 0.9rem;
+  appearance: none;
+  -webkit-appearance: none;
+  border: none;
+  border-radius: 999px;
+  background: var(--progress-track);
+  overflow: hidden;
+}
+
+progress::-webkit-progress-bar {
+  background: var(--progress-track);
+  border-radius: 999px;
+}
+
+progress::-webkit-progress-value {
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width 0.1s linear;
+}
+
+progress::-moz-progress-bar {
+  background: var(--accent);
+  border-radius: 999px;
+}
+
+.percent {
+  min-width: 3.5em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.log-heading {
+  font-size: 0.95rem;
+  margin: 1rem 0 0.25rem;
+  color: var(--muted);
+}
+
+.log {
+  margin: 0;
+  padding-left: 1.25rem;
+  font-size: 0.95rem;
+  color: var(--muted);
+}
+
+.log:empty {
+  display: none;
+}
+
+/* Buttons and links */
+
+button,
+.button {
+  display: inline-block;
+  font: inherit;
+  font-weight: 600;
+  padding: 0.6rem 1.1rem;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-text);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled),
+.button:hover {
+  filter: brightness(1.08);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+button#cancel {
+  background: transparent;
+  color: var(--text);
+  border-color: var(--border);
+}
+
+/* Result */
+
+.preview {
+  display: block;
+  width: 100%;
+  max-height: 60vh;
+  background: #000;
+  border-radius: var(--radius);
+  margin-bottom: 1rem;
+}
+
+.summary {
+  margin: 0 0 1rem;
+  padding-left: 1.25rem;
+}
+
+.summary li {
+  margin-bottom: 0.25rem;
+}
+
+#result .button {
+  margin-bottom: 1rem;
+}
+
+/* Footer */
+
+.site-footer {
+  padding-bottom: 1.5rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+  text-align: center;
+}
+
+.site-footer a {
+  color: inherit;
+}
+
+/* Small screens */
+
+@media (max-width: 480px) {
+  .card {
+    padding: 1rem;
+  }
+
+  .progress-row button {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+  }
+}
