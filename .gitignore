@@ -1,0 +1,7 @@
+/target
+/dist
+node_modules
+.ram-status
+.ram-harness
+*.mp4
+.DS_Store
