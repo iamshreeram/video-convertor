@@ -5,3 +5,4 @@ node_modules
 .ram-harness
 *.mp4
 .DS_Store
+/dist-node
