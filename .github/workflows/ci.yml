@@ -1,0 +1,153 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Pull requests cancel superseded runs of the same ref. Runs on main are never
+# cancelled, so every published site is either fully built or not started.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Test, build and publish the site
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable, wasm target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry, git checkouts and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Resolve wasm-bindgen version
+        id: wbver
+        run: |
+          VER="$(sed -n 's/^wasm-bindgen = "=\([0-9.]*\)".*/\1/p' Cargo.toml | head -n1)"
+          if [ -z "$VER" ]; then
+            echo "could not find the pinned wasm-bindgen version in Cargo.toml" >&2
+            exit 1
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "wasm-bindgen pin: $VER"
+
+      - name: Cache wasm-bindgen CLI
+        id: wbcli
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/wasm-bindgen
+          key: wasm-bindgen-cli-${{ steps.wbver.outputs.version }}
+
+      - name: Install wasm-bindgen CLI (cache miss only)
+        if: steps.wbcli.outputs.cache-hit != 'true'
+        run: cargo install wasm-bindgen-cli --version "$VER" --locked
+        env:
+          VER: ${{ steps.wbver.outputs.version }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Test (Rust)
+        run: cargo test --locked
+
+      - name: Clippy (library, warnings are errors)
+        run: cargo clippy --lib --locked -- -D warnings
+
+      - name: Test (JavaScript units)
+        run: npm test
+
+      - name: Build site
+        run: bash scripts/build.sh
+
+      - name: Check build output
+        run: |
+          test -s dist/pkg/mkv2mp4_bg.wasm
+          test -f dist/index.html
+          test -f dist/.nojekyll
+
+      - name: Check shipped files for external URLs
+        # The SVG and XHTML namespace identifiers are not requests and are allowed.
+        run: |
+          hits="$(grep -rIEn 'https?://' dist --exclude-dir=pkg \
+            --include='*.html' --include='*.js' --include='*.mjs' --include='*.css' \
+            --include='*.svg' --include='*.json' --include='*.webmanifest' \
+            | grep -vE 'https?://www\.w3\.org/(2000/svg|1999/xhtml)' || true)"
+          if [ -n "$hits" ]; then
+            echo "External URLs found in shipped files (dist/pkg excluded):" >&2
+            echo "$hits" >&2
+            exit 1
+          fi
+          echo "No external URLs in shipped files."
+
+      - name: Commit built site to gh-pages
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Work on a copy so that no .git directory ends up in the Pages artifact.
+          site="$RUNNER_TEMP/gh-pages-site"
+          rm -rf "$site"
+          cp -R dist "$site"
+          cd "$site"
+          git init -q -b gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Deploy ${GITHUB_SHA}"
+          git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
+
+      - name: Configure Pages
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

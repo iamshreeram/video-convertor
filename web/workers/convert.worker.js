@@ -1,23 +1,31 @@
-// Module worker: runs the Rust/WASM remuxer off the main thread.
-// Messages in:  {type:"convert", file, sessionId, sweep, runId, inMemory}
-//               {type:"cleanup", sessionId, maxRun}
-// Messages out: {type:"progress", fraction}
-//               {type:"done", file, summary, outputName}
-//               {type:"error", message}
-//               {type:"cleaned"}
-import init, { convert_mkv_to_mp4 } from "./pkg/mkv2mp4.js";
+// Module worker: probes and converts one MKV/WebM file with the Rust/WASM core.
+// It posts {type:"ready"} first so the page can confirm the secure start-up
+// (DESIGN.md B3.6) before any message is sent to it.
+//
+// In:  {type:"process", file, sessionId, sweep, runId, inMemory, memoryBudgetBytes}
+//      {type:"cleanup", sessionId, runIds:[number]}
+// Out: stage | analysis | progress | info | done | error | cleaned
+import init, { convert_mkv_to_mp4, probe_mkv, version } from "../pkg/mkv2mp4.js";
 
-const MEMORY_CAP_BYTES = 1.5 * 2 ** 30;
+postMessage({ type: "ready" });
+
 const PROGRESS_INTERVAL_MS = 100;
 const OUTPUT_NAME_PATTERN = /^out-(.+)-(\d+)\.mp4$/;
 const CLEANUP_RETRY_MS = 150;
 const CLEANUP_DEADLINE_MS = 15000;
 
 let wasmReady = null;
+let infoSent = false;
 
+/** Initialises wasm once and reports its version once. */
 function ensureWasm() {
   if (!wasmReady) {
-    wasmReady = init();
+    wasmReady = init().then(() => {
+      if (!infoSent) {
+        infoSent = true;
+        postMessage({ type: "info", version: version() });
+      }
+    });
   }
   return wasmReady;
 }
@@ -27,14 +35,19 @@ self.onmessage = (event) => {
   if (!msg || typeof msg !== "object") {
     return;
   }
-  if (msg.type === "convert") {
-    void runConvert(msg);
+  if (msg.type === "process") {
+    void runProcess(msg);
   } else if (msg.type === "cleanup") {
     void runCleanup(msg);
   }
 };
 
-async function runConvert(msg) {
+/** @param {unknown} err @returns {string} the raw message thrown by wasm or JS */
+function errorText(err) {
+  return String(err?.message ?? err);
+}
+
+async function runProcess(msg) {
   const state = { opfs: null };
   try {
     const file = msg.file;
@@ -43,16 +56,33 @@ async function runConvert(msg) {
     }
     await ensureWasm();
 
+    postMessage({ type: "stage", stage: "analyzing" });
+    const read = makeReader(file);
+    const report = JSON.parse(probe_mkv(file.size, read));
+    postMessage({ type: "analysis", report });
+
     const outputName = makeOutputName(file.name);
-    const root = msg.inMemory ? null : await getOpfsRoot();
-    if (root && msg.sweep === true) {
-      await sweepOrphans(root);
-    }
-    if (root) {
-      state.opfs = await createOpfsOutput(root, `out-${msg.sessionId}-${msg.runId}.mp4`);
+    const budget = normaliseBudget(msg.memoryBudgetBytes);
+
+    // OPFS unless the page asked for memory or the file cannot be created.
+    if (!msg.inMemory) {
+      const root = await getOpfsRoot();
+      if (root) {
+        if (msg.sweep === true) {
+          await sweepOrphans(root);
+        }
+        state.opfs = await createOpfsOutput(root, `out-${msg.sessionId}-${msg.runId}.mp4`);
+      }
     }
 
-    const readChunk = makeReader(file);
+    // Nothing has been written yet: refuse an oversized in-memory output now.
+    if (!state.opfs && report.outputSize > budget) {
+      throw new Error(
+        `memory budget exceeded: output is ${report.outputSize} bytes, ${budget} bytes of memory budget remain`,
+      );
+    }
+
+    postMessage({ type: "stage", stage: "converting" });
     const onProgress = makeProgressReporter();
     let result;
     let summaryText;
@@ -66,7 +96,9 @@ async function runConvert(msg) {
         }
         position += written;
       };
-      summaryText = convert_mkv_to_mp4(file.size, 0, readChunk, writeChunk, onProgress);
+      summaryText = convert_mkv_to_mp4(file.size, 0, read, writeChunk, onProgress);
+      postMessage({ type: "progress", fraction: 1 });
+      postMessage({ type: "stage", stage: "finalizing" });
       opfs.access.flush();
       opfs.access.close();
       opfs.access = null;
@@ -75,40 +107,48 @@ async function runConvert(msg) {
       const chunks = [];
       summaryText = convert_mkv_to_mp4(
         file.size,
-        MEMORY_CAP_BYTES,
-        readChunk,
+        budget,
+        read,
         (chunk) => {
           chunks.push(chunk);
         },
         onProgress,
       );
+      postMessage({ type: "progress", fraction: 1 });
+      postMessage({ type: "stage", stage: "finalizing" });
       result = new Blob(chunks, { type: "video/mp4" });
     }
 
     const summary = JSON.parse(summaryText);
-    postMessage({ type: "progress", fraction: 1 });
-    postMessage({ type: "done", file: result, summary, outputName });
+    postMessage({ type: "done", file: result, summary, outputName, inMemory: !state.opfs });
     self.close();
   } catch (err) {
     await discardOutput(state.opfs);
-    postMessage({ type: "error", message: errorText(err) });
+    const message = errorText(err);
+    postMessage({ type: "error", message, details: message });
     self.close();
   }
 }
 
-// Removes this session's outputs with runId <= msg.maxRun. A file may still be
-// locked by a worker that was just terminated (its handle is released
-// asynchronously), so failed removals are retried until the deadline.
+/** @param {unknown} value @returns {number} a non-negative byte budget (0 when unusable) */
+function normaliseBudget(value) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+// Deletes exactly this session's outputs whose run id is listed. A file may
+// still be locked by a worker that was just terminated (its handle is released
+// asynchronously), so busy removals are retried until the deadline.
 async function runCleanup(msg) {
   const removed = [];
   const failed = [];
   try {
     const root = await getOpfsRoot();
-    if (root) {
+    if (root && typeof msg.sessionId === "string") {
+      const wanted = new Set((Array.isArray(msg.runIds) ? msg.runIds : []).map(Number));
       const targets = [];
       for (const name of await listOutputNames(root)) {
         const parsed = parseOutputName(name);
-        if (parsed && parsed.sessionId === msg.sessionId && Number(parsed.runId) <= msg.maxRun) {
+        if (parsed && parsed.sessionId === msg.sessionId && wanted.has(Number(parsed.runId))) {
           targets.push(name);
         }
       }
@@ -267,14 +307,4 @@ async function removeQuietly(root, name) {
   } catch {
     // Missing or still-open files are ignored.
   }
-}
-
-function errorText(err) {
-  if (err && typeof err.message === "string" && err.message) {
-    return err.message;
-  }
-  if (typeof err === "string" && err) {
-    return err;
-  }
-  return "Conversion failed.";
 }

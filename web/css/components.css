@@ -1,0 +1,846 @@
+/*
+ * Components: buttons, icon buttons, badges and chips, navigation items,
+ * dropzone, job cards and progress, job list, empty state, dialogs, toasts,
+ * the about list and the logo.
+ * Every interactive element has a 40px minimum target and a focus-visible ring
+ * (base.css).
+ */
+
+/* ---- brand --------------------------------------------------------------- */
+.logo-mark__bg {
+  fill: var(--accent);
+}
+
+.logo-mark__fg {
+  fill: var(--on-accent);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.brand__text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+  min-width: 0;
+}
+
+.brand__name {
+  font-weight: 650;
+  font-size: 1rem;
+  color: var(--text);
+}
+
+.brand__tag {
+  font-size: 0.75rem;
+  color: var(--text-subtle);
+  white-space: nowrap;
+}
+
+/* ---- buttons ------------------------------------------------------------- */
+/* Colour tokens are never transitioned: a theme change must flip every surface
+   and text colour in the same frame. A half-faded surface under text that has
+   already flipped is the mixed-theme defect. Only non-colour properties animate. */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: var(--touch-min);
+  padding: 0 var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  line-height: 1.2;
+  text-decoration: none;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.btn:disabled {
+  opacity: 0.55;
+}
+
+.btn--sm {
+  padding: 0 var(--space-2) 0 12px;
+  min-height: var(--touch-min);
+  font-size: 0.875rem;
+}
+
+.btn--lg {
+  min-height: 44px;
+  padding: 0 var(--space-4);
+  font-size: 1rem;
+}
+
+.btn--primary {
+  background: var(--accent);
+  color: var(--on-accent);
+  box-shadow: var(--shadow-1);
+}
+
+.btn--primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.btn--secondary {
+  background: var(--surface);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.btn--secondary:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+
+.btn--ghost {
+  background: transparent;
+  color: var(--accent-text);
+}
+
+.btn--ghost:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+
+.btn--danger {
+  background: var(--danger);
+  color: var(--on-danger);
+}
+
+.btn--danger:hover:not(:disabled) {
+  background: var(--danger-hover);
+}
+
+.icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: var(--touch-min);
+  height: var(--touch-min);
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.icon-btn:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.privacy-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: var(--touch-min);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--success-border);
+  border-radius: var(--radius-pill);
+  background: var(--success-soft);
+  color: var(--success);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.privacy-badge:hover {
+  filter: brightness(0.97);
+}
+
+/* ---- chips, pills, counters ---------------------------------------------- */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  padding: 2px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  background: var(--neutral-soft);
+  color: var(--neutral-text);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.chip--neutral {
+  background: var(--neutral-soft);
+  color: var(--neutral-text);
+}
+
+.chip--info {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.chip--success {
+  background: var(--success-soft);
+  color: var(--success);
+  border-color: var(--success-border);
+}
+
+.chip--danger {
+  background: var(--danger-soft);
+  color: var(--danger);
+  border-color: var(--danger-border);
+}
+
+.chip--muted {
+  background: transparent;
+  color: var(--text-muted);
+  border-color: var(--border-strong);
+}
+
+.chip--track {
+  background: var(--surface-2);
+  color: var(--text);
+  border-color: var(--border);
+  font-weight: 500;
+}
+
+.chip--track.chip--audio .icon {
+  color: var(--accent-text);
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-3);
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.count-badge {
+  display: inline-grid;
+  place-items: center;
+  min-width: 24px;
+  height: 22px;
+  margin-left: var(--space-2);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--surface-3);
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+/* ---- sidebar navigation -------------------------------------------------- */
+.sidebar__label {
+  padding: 0 var(--space-2) var(--space-1);
+  color: var(--text-subtle);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.nav-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: var(--touch-min);
+  padding: var(--space-2) 12px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  text-decoration: none;
+  font: inherit;
+}
+
+.nav-item:hover:not(.is-active):not(.nav-item--soon) {
+  background: var(--surface-2);
+}
+
+.nav-item.is-active {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.nav-item__title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-weight: 600;
+}
+
+.nav-item__sub {
+  color: var(--text-subtle);
+  font-size: 0.8125rem;
+}
+
+.nav-item--soon {
+  color: var(--text-subtle);
+  cursor: not-allowed;
+}
+
+.nav-item--soon .nav-item__sub {
+  color: var(--text-subtle);
+}
+
+/* ---- dropzone ------------------------------------------------------------ */
+.dropzone {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-6) var(--space-4);
+  border: 2px dashed var(--border-strong);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: var(--shadow-1);
+  text-align: center;
+}
+
+.dropzone:hover {
+  border-color: var(--accent);
+}
+
+.dropzone.is-dragover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.dropzone.is-disabled {
+  opacity: 0.6;
+  border-style: solid;
+}
+
+.dropzone__icon {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  margin-bottom: var(--space-1);
+  border-radius: 16px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.dropzone__title {
+  font-size: 1.25rem;
+}
+
+.dropzone__sub {
+  max-width: 48ch;
+  color: var(--text-muted);
+}
+
+.dropzone .btn {
+  margin-top: var(--space-2);
+}
+
+/* ---- job list ------------------------------------------------------------ */
+.job-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.job-list__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.job-list__title {
+  display: flex;
+  align-items: center;
+}
+
+.job-list__cards {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: var(--space-5) var(--space-4);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.empty-state__art {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.empty-state__badge {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  color: var(--text-subtle);
+}
+
+.empty-state__badge--main {
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.empty-state__text {
+  font-weight: 500;
+}
+
+/* ---- job card ------------------------------------------------------------ */
+.job {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding: var(--space-3) 20px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: var(--shadow-1);
+}
+
+.job__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.job__icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
+
+.job__title {
+  display: flex;
+  flex: 1 1 200px;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.job__name {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job__size {
+  color: var(--text-subtle);
+  font-size: 0.8125rem;
+}
+
+.job__stage {
+  color: var(--text-muted);
+  font-size: 0.875rem;
+}
+
+.job__meters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  color: var(--text-muted);
+  font-size: 0.875rem;
+}
+
+.meter--strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.job__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.job__tracks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.job__fact {
+  color: var(--text-muted);
+  font-size: 0.875rem;
+}
+
+.job__fact + .job__fact::before {
+  content: "\00b7";
+  margin-right: var(--space-2);
+  color: var(--text-subtle);
+}
+
+.job__extras {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.job__extras:empty {
+  display: none;
+}
+
+.job__warnings {
+  padding: var(--space-2) 12px;
+  border: 1px solid var(--warning-border);
+  border-radius: var(--radius-md);
+  background: var(--warning-soft);
+  color: var(--text);
+  font-size: 0.875rem;
+}
+
+.job__warnings summary {
+  color: var(--warning);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.job__warn-list {
+  margin: var(--space-2) 0 0 var(--space-3);
+  list-style: disc;
+}
+
+.job__error {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-md);
+  background: var(--danger-soft);
+  color: var(--text);
+}
+
+.job__error-title {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.job__error-hint {
+  color: var(--text-muted);
+  font-size: 0.875rem;
+}
+
+.job__error-details summary {
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+
+.job__error-details code {
+  display: block;
+  margin-top: 6px;
+  padding: 8px;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.job__preview video {
+  width: 100%;
+  max-height: 360px;
+  border-radius: var(--radius-md);
+  background: #000;
+}
+
+.job__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  /* 12px card gap + 4px here: the action row sits 16px below the meters/facts/extras. */
+  margin-top: var(--space-1);
+}
+
+/* Card actions are touch targets: 44px tall (WCAG 2.5.5 AAA size, Apple HIG). */
+.job__actions .btn {
+  min-height: 44px;
+}
+
+/* Progress: determinate via --p (set by job-card.js); indeterminate sweeps. */
+.progress {
+  position: relative;
+  height: 8px;
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  background: var(--progress-track);
+}
+
+.progress__bar {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--progress-fill);
+  transform-origin: 0 50%;
+  transform: scaleX(var(--p, 0));
+  transition: transform var(--dur-base) var(--ease-out);
+}
+
+.job[data-state="done"] .progress__bar {
+  background: var(--success);
+}
+
+/* Indeterminate (queued, analysing, converting without a fraction): the track
+   stays muted and a soft highlight sweeps across it. No aria-valuenow (job-card.js).
+   Under reduced motion the sweep is removed and the track gets a static hatch. */
+.progress.is-indeterminate .progress__bar {
+  top: 0;
+  bottom: 0;
+  left: 0;
+  right: auto;
+  width: 40%;
+  transform: none;
+  background: linear-gradient(90deg, transparent, var(--progress-fill) 50%, transparent);
+  animation: progress-sweep 1.4s ease-in-out infinite;
+}
+
+@keyframes progress-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress.is-indeterminate .progress__bar {
+    width: 100%;
+    animation: none;
+    background: repeating-linear-gradient(-45deg, var(--surface-3) 0 6px, var(--progress-track) 6px 12px);
+  }
+}
+
+/* ---- dialogs ------------------------------------------------------------- */
+.dialog {
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-3);
+  overflow: hidden;
+}
+
+.dialog[open] {
+  animation: fade-up var(--dur-base) var(--ease-out);
+}
+
+.dialog::backdrop {
+  background: var(--backdrop);
+}
+
+.dialog__inner {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 32px);
+}
+
+.dialog__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-4) var(--space-2);
+}
+
+.dialog__title {
+  font-size: 1.125rem;
+  line-height: 1.3;
+}
+
+.dialog__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: 0 var(--space-4) var(--space-3);
+  overflow-y: auto;
+}
+
+.dialog__lead {
+  color: var(--text-muted);
+}
+
+.dialog__meta {
+  color: var(--text-subtle);
+  font-size: 0.875rem;
+}
+
+.dialog__footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+.prose-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-left: var(--space-3);
+  list-style: disc;
+}
+
+.info-list {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--space-1) var(--space-3);
+  margin-top: var(--space-2);
+}
+
+.info-list dt {
+  color: var(--text-muted);
+}
+
+.info-list dd {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* Shared callout (privacy note on the tool page). Text is a real class; the
+   action button wraps under it on narrow screens. */
+.callout {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 0.875rem;
+}
+
+.callout__text {
+  flex: 1 1 240px;
+  min-width: 0;
+  margin: 0;
+}
+
+.callout .icon {
+  flex: none;
+  color: var(--success);
+}
+
+/* ---- toasts -------------------------------------------------------------- */
+.toasts {
+  position: fixed;
+  right: var(--space-3);
+  bottom: var(--space-3);
+  z-index: var(--z-toast);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-2);
+  max-width: min(380px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+  padding: 12px 12px 12px 16px;
+  border: 1px solid var(--border);
+  border-left-width: 4px;
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-2);
+  pointer-events: auto;
+  animation: fade-up var(--dur-base) var(--ease-out);
+}
+
+.toast--info {
+  border-left-color: var(--accent);
+}
+
+.toast--success {
+  border-left-color: var(--success);
+}
+
+.toast--error {
+  border-left-color: var(--danger);
+}
+
+.toast__icon {
+  display: inline-flex;
+  flex: none;
+  margin-top: 1px;
+}
+
+.toast--info .toast__icon {
+  color: var(--accent-text);
+}
+
+.toast--success .toast__icon {
+  color: var(--success);
+}
+
+.toast--error .toast__icon {
+  color: var(--danger);
+}
+
+.toast__text {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
+
+.toast__close {
+  width: var(--touch-min);
+  height: var(--touch-min);
+  margin: -8px -8px -8px 0;
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}

@@ -1,91 +1,27 @@
 <!doctype html>
 <html lang="en" data-state="init">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light dark">
-  <title>MKV to MP4 converter (runs in your browser)</title>
-  <link rel="stylesheet" href="./style.css">
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; worker-src 'self' blob:; font-src 'self'; manifest-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Convertor — MKV to MP4, locally in your browser</title>
+<meta name="description" content="Convert MKV video to MP4 entirely in your browser. Your files never leave your device.">
+<link rel="icon" href="./assets/favicon.svg" type="image/svg+xml">
+<script src="./js/theme-init.js"></script>
+<link rel="stylesheet" href="./css/tokens.css">
+<link rel="stylesheet" href="./css/base.css">
+<link rel="stylesheet" href="./css/layout.css">
+<link rel="stylesheet" href="./css/components.css">
 </head>
 <body>
-  <a class="skip-link" href="#main">Skip to the converter</a>
-
-  <header class="site-header">
-    <h1>MKV to MP4 converter</h1>
-    <p class="intro">
-      Remuxes (copies) video/audio into an MP4 container without re-encoding: fast and lossless.
-      Your file never leaves your computer.
-    </p>
-  </header>
-
-  <main id="main" class="wrap">
-    <noscript>
-      <p class="notice" role="alert">This converter needs JavaScript and WebAssembly. Please enable JavaScript.</p>
-    </noscript>
-
-    <p id="unsupported" class="notice" role="alert" hidden>
-      This browser lacks a feature the converter needs (Web Workers, WebAssembly or the File API).
-      Please use a current version of Chrome, Edge, Firefox or Safari.
-    </p>
-
-    <section class="card" aria-labelledby="choose-heading">
-      <h2 id="choose-heading">1. Choose a file</h2>
-
-      <div id="drop-zone" class="drop-zone" aria-describedby="drop-hint">
-        <p id="drop-hint">Drop an .mkv or .webm file here, or pick one with the button below.</p>
-        <input type="file" id="file-input" aria-label="Choose an .mkv or .webm file" aria-describedby="drop-hint" accept=".mkv,.webm,video/x-matroska,video/webm" disabled>
-      </div>
-
-      <p id="file-info" class="file-info" aria-live="polite"></p>
-      <p id="size-note" class="note" hidden>
-        Files over 2 GiB: if this browser has no Origin Private File System storage, the in-memory fallback may fail.
-      </p>
-
-      <details class="codecs">
-        <summary>Supported codecs</summary>
-        <ul>
-          <li><strong>Video:</strong> H.264 (AVC), H.265 (HEVC), AV1</li>
-          <li><strong>Audio:</strong> AAC, MP3, Opus, FLAC, AC-3</li>
-          <li><strong>Skipped with a warning:</strong> VP8, VP9, E-AC-3, DTS and other audio, subtitles and attachments.
-            VP8/VP9 video cannot be placed in an MP4 by this converter.</li>
-        </ul>
-      </details>
-    </section>
-
-    <section class="card" aria-labelledby="convert-heading">
-      <h2 id="convert-heading">2. Convert</h2>
-
-      <div id="progress-row" class="progress-row" hidden>
-        <progress id="progress" max="1" value="0" aria-label="Conversion progress"></progress>
-        <span id="percent" class="percent">0%</span>
-        <button type="button" id="cancel" disabled>Cancel</button>
-      </div>
-
-      <p id="error" class="error" role="alert"></p>
-
-      <h3 class="log-heading">Log</h3>
-      <ul id="log" class="log" aria-live="polite"></ul>
-    </section>
-
-    <section id="result" class="card" aria-labelledby="result-heading" tabindex="-1" hidden>
-      <h2 id="result-heading">3. Result</h2>
-
-      <video id="preview" class="preview" controls preload="metadata"></video>
-
-      <p>
-        <a id="download" class="button" href="./" download="converted.mp4">Download MP4</a>
-      </p>
-
-      <ul id="summary" class="summary"></ul>
-
-      <button type="button" id="again" disabled>Convert another file</button>
-    </section>
-  </main>
-
-  <footer class="site-footer">
-    <p><a href="./">Built with Rust + WebAssembly</a></p>
-  </footer>
-
-  <script type="module" src="./main.js"></script>
+<a class="skip-link" href="#main">Skip to content</a>
+<div id="app"></div>
+<noscript>
+<div class="noscript">
+<p>Convertor needs JavaScript and WebAssembly to convert files. Please enable JavaScript in your browser, then reload this page.</p>
+</div>
+</noscript>
+<script type="module" src="./js/main.js"></script>
 </body>
 </html>
