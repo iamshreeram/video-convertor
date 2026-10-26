@@ -43,7 +43,7 @@ A file with no supported track fails with an error that lists what was found.
 
 A remux copies the existing compressed bytes and rewrites only the container metadata. There is no decoding and no per-pixel or per-sample computation, so throughput is bounded by how fast the browser can read the input and write the output, not by the CPU or GPU.
 
-Measured on a laptop with headless Chrome writing to OPFS: a file of about 390 MB converts in roughly 5 to 12 seconds, depending on the disk.
+Measured on a laptop with headless Chrome writing to OPFS: a file of about 390 MB converts in about 2 seconds from drop to finished download link (the 12 Mbps test file used for measurements), because the work is a sequential copy. Slower disks take proportionally longer.
 
 **Why WebGPU is not used.** A GPU only helps with heavy per-pixel or per-sample work. Remuxing has none, so a GPU path would add complexity and cost without making the copy faster. GPU work would matter for re-encoding, which this tool does not do. A future tool that transcodes would use the browser's WebCodecs hardware codecs rather than WebGPU.
 
@@ -51,7 +51,7 @@ Measured on a laptop with headless Chrome writing to OPFS: a file of about 390 M
 
 - **Input** is read in slices from the `File` on the worker. The whole file is never loaded into memory. Only a compact index of blocks (offset, size, timestamp, keyframe flag) is kept.
 - **Output** is written to the Origin Private File System (OPFS), which is disk-backed, where the browser supports it (Chrome and Edge, Safari 15.2+, Firefox 111+).
-- **Fallback.** Where OPFS is unavailable, the output is held in memory. The total of all retained in-memory results is capped at an aggregate budget of **1.5 GiB**. A file that would exceed the remaining budget is refused before any work starts. Download or remove finished files to free budget.
+- **Fallback.** Where OPFS is unavailable, the output is held in memory. The total of all retained in-memory results is capped at an aggregate budget of **1.5 GiB**. A file that would exceed the remaining budget is refused after analysis and before anything is written. Download or remove finished files to free budget.
 
 ## Limitations
 

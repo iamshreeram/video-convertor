@@ -30,6 +30,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
 
       - name: Cache cargo registry, git checkouts and target
         uses: actions/cache@v4
@@ -93,7 +94,7 @@ jobs:
       - name: Check shipped files for external URLs
         # The SVG and XHTML namespace identifiers are not requests and are allowed.
         run: |
-          hits="$(grep -rIEn 'https?://' dist --exclude-dir=pkg \
+          hits="$(grep -rIEn 'https?://' dist \
             --include='*.html' --include='*.js' --include='*.mjs' --include='*.css' \
             --include='*.svg' --include='*.json' --include='*.webmanifest' \
             | grep -vE 'https?://www\.w3\.org/(2000/svg|1999/xhtml)' || true)"
@@ -121,10 +122,6 @@ jobs:
           git add -A
           git commit -q -m "Deploy ${GITHUB_SHA}"
           git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
-
-      - name: Configure Pages
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-        uses: actions/configure-pages@v5
 
       - name: Upload Pages artifact
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'

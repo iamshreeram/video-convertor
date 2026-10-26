@@ -1307,10 +1307,15 @@ async function testT15(env) {
   const soonCount = await soon.count();
   assert(soonCount >= 1, "no nav item with aria-disabled=true");
   for (let i = 0; i < soonCount; i += 1) {
-    const before = await page.evaluate(() => location.hash);
-    await soon.nth(i).click();
-    const after = await page.evaluate(() => location.hash);
-    assert(before === after, `clicking a soon item changed location.hash ${before} -> ${after}`);
+    // Soon items are aria-disabled on purpose but stay focusable, so Playwright's
+    // actionability check (which waits for "enabled") must be bypassed with force.
+    const beforeHash = await page.evaluate(() => location.hash);
+    const beforeUrl = page.url();
+    await soon.nth(i).click({ force: true });
+    await page.waitForTimeout(150);
+    const afterHash = await page.evaluate(() => location.hash);
+    assert(beforeHash === afterHash, `clicking a soon item changed location.hash ${beforeHash} -> ${afterHash}`);
+    assert(page.url() === beforeUrl, `clicking a soon item navigated ${beforeUrl} -> ${page.url()}`);
   }
   const active = page.locator('[data-testid="nav-item"][aria-current="page"]');
   assert((await active.count()) === 1, "expected exactly one nav item with aria-current=page");

@@ -6,9 +6,8 @@
  * properties via el.style.setProperty; no style attribute is ever written.
  */
 
-// SVG namespace identifier, not a network request. Concatenated so the shipped
-// sources contain no absolute URL literal.
-const SVG_NS = "http:" + "//www.w3.org/2000/svg";
+// SVG namespace identifier, not a network request (allow-listed by the CI URL check).
+const SVG_NS = "http://www.w3.org/2000/svg";
 
 let uidSeq = 0;
 
