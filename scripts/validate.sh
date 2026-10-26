@@ -6,8 +6,8 @@
 #
 # Requires `bash scripts/build.sh --node` first (node-smoke loads dist-node/).
 # For every *.mkv in fixtures_dir: convert with node-smoke, then check
-#   convert, decode, streams, packet-count, packet-timing, duration,
-#   video-start, framemd5, audio-length, audio-first1s.
+#   convert, decode, streams, packet-count, pkt-timing, duration,
+#   start-offsets, aspect, lang, framemd5, audio-length, audio-first1s.
 # Files named truncated*.mkv only get the convert and decode checks.
 # Prints one PASS/FAIL/SKIP line per check and a summary; exits 1 on any FAIL.
 # Bash 3.2 compatible (macOS); python3 is used only for numeric comparisons.
@@ -67,8 +67,10 @@ size_of() {
 write_helpers() {
   cat >"$tmp/helpers.py" <<'PY'
 import sys
+from fractions import Fraction
 
 PTS_TOL = 0.0011
+START_TOL = 0.0011
 
 
 def load(path):
@@ -85,24 +87,47 @@ def load(path):
     return streams
 
 
+def numbers(values):
+    nums = []
+    bad = 0
+    for v in values:
+        try:
+            nums.append(float(v))
+        except ValueError:
+            bad += 1
+    return nums, bad
+
+
 def packets(a, b):
     src = load(a)
     out = load(b)
     problems = []
     if sorted(src) != sorted(out):
         problems.append('stream sets differ src=%s out=%s' % (sorted(src), sorted(out)))
+    # Each file's timeline is shifted so the earliest packet of ANY stream is
+    # at 0 (like ffmpeg -c copy); compare per-stream timing relative to that.
+    mins = {}
+    for label, streams in (('src', src), ('out', out)):
+        allv = []
+        for idx in sorted(streams):
+            nums, bad = numbers(streams[idx]['pts'])
+            if bad:
+                problems.append('%s stream %s non-numeric pts' % (label, idx))
+            allv.extend(nums)
+        mins[label] = min(allv) if allv else 0.0
     maxd = 0.0
     for idx in sorted(set(src) & set(out)):
         sp, op = src[idx]['pts'], out[idx]['pts']
         if len(sp) != len(op):
             problems.append('stream %s packets %d vs %d' % (idx, len(sp), len(op)))
             continue
-        try:
-            sa = sorted(float(x) for x in sp)
-            oa = sorted(float(x) for x in op)
-        except ValueError:
+        sn, sbad = numbers(sp)
+        on, obad = numbers(op)
+        if sbad or obad:
             problems.append('stream %s non-numeric pts' % idx)
             continue
+        sa = sorted(x - mins['src'] for x in sn)
+        oa = sorted(x - mins['out'] for x in on)
         d = max([abs(x - y) for x, y in zip(sa, oa)] or [0.0])
         maxd = max(maxd, d)
         if d > PTS_TOL:
@@ -115,7 +140,119 @@ def packets(a, b):
     if problems:
         print('; '.join(problems))
         return 1
-    print('streams=%d max_pts_diff=%.6f s' % (len(src), maxd))
+    print('streams=%d max_pts_diff=%.6f s (rel. to earliest packet: src %.6f out %.6f)'
+          % (len(src), maxd, mins['src'], mins['out']))
+    return 0
+
+
+def starts(path):
+    rows = []
+    with open(path) as fh:
+        for line in fh:
+            f = line.strip().split(',')
+            if len(f) < 2:
+                continue
+            rows.append(f[1])
+    return rows
+
+
+def offsets(a, b):
+    sv = starts(a)
+    ov = starts(b)
+    if len(sv) != len(ov):
+        print('stream count %d vs %d' % (len(sv), len(ov)))
+        return 1
+    sn, sbad = numbers(sv)
+    on, obad = numbers(ov)
+    if sbad or obad or not sn:
+        print('non-numeric or missing start_time src=%r out=%r' % (sv, ov))
+        return 1
+    smin = min(sn)
+    omin = min(on)
+    problems = []
+    maxd = 0.0
+    for i in range(len(sn)):
+        d = abs((sn[i] - smin) - (on[i] - omin))
+        maxd = max(maxd, d)
+        if d > START_TOL:
+            problems.append('stream %d offset src=%.6f out=%.6f' % (i, sn[i] - smin, on[i] - omin))
+    if abs(omin) > 0.001:
+        problems.append('min output start_time %.6f not 0 (1 ms)' % omin)
+    if problems:
+        print('; '.join(problems))
+        return 1
+    print('streams=%d out_min_start=%.6f max_offset_diff=%.6f s' % (len(sn), omin, maxd))
+    return 0
+
+
+def first_row(path):
+    with open(path) as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                return line.split(',')
+    return []
+
+
+def ratio(text):
+    try:
+        num, den = text.split(':')
+        return Fraction(int(num), int(den))
+    except (ValueError, ZeroDivisionError):
+        return text
+
+
+def aspect(a, b):
+    sf = first_row(a)
+    of = first_row(b)
+    if len(sf) != 2 or len(of) != 2:
+        print('unexpected ffprobe rows src=%r out=%r' % (sf, of))
+        return 1
+    names = ['sample_aspect_ratio', 'display_aspect_ratio']
+    checked = []
+    problems = []
+    for name, s, o in zip(names, sf, of):
+        if s in ('N/A', ''):
+            continue
+        checked.append('%s=%s' % (name, s))
+        if ratio(s) != ratio(o):
+            problems.append('%s src=%s out=%s' % (name, s, o))
+    if not checked:
+        print('source has no sample/display aspect ratio (N/A)')
+        return 3
+    if problems:
+        print('; '.join(problems))
+        return 1
+    print('%s match' % ', '.join(checked))
+    return 0
+
+
+def langs(path):
+    values = []
+    with open(path) as fh:
+        for line in fh:
+            f = line.strip().split(',')
+            if not f or not f[0]:
+                continue
+            values.append(f[1] if len(f) > 1 else '')
+    return values
+
+
+def lang(a, b):
+    sv = langs(a)
+    ov = langs(b)
+    if len(sv) != len(ov):
+        print('stream count %d vs %d' % (len(sv), len(ov)))
+        return 1
+    tagged = [i for i, x in enumerate(sv) if x]
+    if not tagged:
+        print('no language tags in source')
+        return 3
+    problems = ['stream %d src=%s out=%s' % (i, sv[i], ov[i]) for i in tagged if sv[i] != ov[i]]
+    if problems:
+        print('; '.join(problems))
+        return 1
+    print('tagged=%d %s' % (len(tagged), ' '.join('%d:%s' % (i, sv[i]) for i in tagged)))
     return 0
 
 
@@ -135,6 +272,12 @@ def main():
         return packets(sys.argv[2], sys.argv[3])
     if mode == 'within':
         return within(sys.argv[2], sys.argv[3], float(sys.argv[4]))
+    if mode == 'offsets':
+        return offsets(sys.argv[2], sys.argv[3])
+    if mode == 'aspect':
+        return aspect(sys.argv[2], sys.argv[3])
+    if mode == 'lang':
+        return lang(sys.argv[2], sys.argv[3])
     print('unknown mode %s' % mode)
     return 2
 
@@ -144,15 +287,33 @@ PY
 }
 
 # check_decode FILE LABEL: full decode of every stream must be silent, exit 0.
+# check_decode FILE LABEL DIR SRC: full decode (ffmpeg -f null) must exit 0.
+# Stderr must be empty, or contain only lines the SOURCE's decode also prints
+# (ffmpeg 6 warns "non monotonically increasing dts" for some B-frame sources
+# when re-encoding; a truncated source adds "File ended prematurely"). A
+# converter must not add diagnostics of its own.
 check_decode() {
-  local name="$1" file="$2" dir="$3"
+  local name="$1" file="$2" dir="$3" src="$4"
   "$ffmpeg_bin" -v error -nostdin -i "$file" -f null - 2>"$dir/decode.err"
   local rc=$?
-  if [ "$rc" -eq 0 ] && [ ! -s "$dir/decode.err" ]; then
+  "$ffmpeg_bin" -v error -nostdin -i "$src" -f null - 2>"$dir/decode-src.err"
+  # ffmpeg log lines carry heap addresses that differ per run; strip them.
+  sed 's/0x[0-9a-f]*//g' "$dir/decode.err" >"$dir/decode.norm"
+  sed 's/0x[0-9a-f]*//g' "$dir/decode-src.err" >"$dir/decode-src.norm"
+  local n_out n_src
+  n_out="$(wc -l <"$dir/decode.norm" | tr -d ' ')"
+  n_src="$(wc -l <"$dir/decode-src.norm" | tr -d ' ')"
+  # Lines in the output's stderr that the source's stderr does not contain.
+  grep -vxF -f "$dir/decode-src.norm" "$dir/decode.norm" >"$dir/decode.extra"
+  if [ "$rc" -eq 0 ] && [ ! -s "$dir/decode.norm" ]; then
     report PASS "$name" decode "ffmpeg exit 0, stderr empty"
     return 0
   fi
-  report FAIL "$name" decode "rc=$rc stderr_lines=$(wc -l <"$dir/decode.err" | tr -d ' ') first: $(head -n1 "$dir/decode.err")"
+  if [ "$rc" -eq 0 ] && [ ! -s "$dir/decode.extra" ]; then
+    report PASS "$name" decode "ffmpeg exit 0; out_lines=$n_out all inherited from source (src_lines=$n_src)"
+    return 0
+  fi
+  report FAIL "$name" decode "rc=$rc out_lines=$n_out src_lines=$n_src new=$(wc -l <"$dir/decode.extra" | tr -d ' ') first_new: $(head -n1 "$dir/decode.extra")"
   return 1
 }
 
@@ -170,7 +331,7 @@ validate_truncated() {
   else
     report FAIL "$name" convert "exit 0 but no 'truncated' warning in summary"
   fi
-  check_decode "$name" "$out" "$dir"
+  check_decode "$name" "$out" "$dir" "$file"
 }
 
 validate_one() {
@@ -197,7 +358,7 @@ validate_one() {
   fi
   report PASS "$name" convert "exit 0"
 
-  check_decode "$name" "$out" "$dir"
+  check_decode "$name" "$out" "$dir" "$file"
 
   # (3) stream parity: codec, type, geometry, audio format, in order.
   local fields="index,codec_name,codec_type,width,height,sample_rate,channels"
@@ -225,7 +386,8 @@ validate_one() {
     report FAIL "$name" pkt-count "ffprobe failed"
   fi
 
-  # (5) packet timing: pts multiset per stream (tol 1.1 ms) and keyframe order.
+  # (5) packet timing: per-stream pts multiset relative to each file's earliest
+  # packet (tol 1.1 ms) and keyframe order.
   local pkt_fields="stream_index,pts_time,dts_time,flags"
   if probe "$dir/src.pkts" -show_entries "packet=$pkt_fields" -of csv=p=0 "$file" &&
     probe "$dir/out.pkts" -show_entries "packet=$pkt_fields" -of csv=p=0 "$out"; then
@@ -240,7 +402,7 @@ validate_one() {
     report FAIL "$name" pkt-timing "ffprobe failed"
   fi
 
-  # (6) container duration within 60 ms; output video starts at 0 (1 ms).
+  # (6) container duration within 60 ms.
   local src_dur out_dur msg
   if probe "$dir/src.dur" -show_entries format=duration -of csv=p=0 "$file" &&
     probe "$dir/out.dur" -show_entries format=duration -of csv=p=0 "$out"; then
@@ -256,15 +418,47 @@ validate_one() {
     report FAIL "$name" duration "ffprobe failed"
   fi
 
-  if probe "$dir/out.vstart" -select_streams v:0 -show_entries stream=start_time -of csv=p=0 "$out"; then
-    msg="$(python3 "$tmp/helpers.py" within "$(head -n1 "$dir/out.vstart")" 0 0.001)"
+  # (6b) start-offsets: each stream's start relative to the earliest stream
+  # must match the source (1.1 ms); earliest output stream starts at 0 (1 ms).
+  if probe "$dir/src.starts" -show_entries stream=index,start_time -of csv=p=0 "$file" &&
+    probe "$dir/out.starts" -show_entries stream=index,start_time -of csv=p=0 "$out"; then
+    msg="$(python3 "$tmp/helpers.py" offsets "$dir/src.starts" "$dir/out.starts")"
     if [ $? -eq 0 ]; then
-      report PASS "$name" vstart-zero "$msg"
+      report PASS "$name" start-offsets "$msg"
     else
-      report FAIL "$name" vstart-zero "$msg"
+      report FAIL "$name" start-offsets "$msg"
     fi
   else
-    report FAIL "$name" vstart-zero "ffprobe failed"
+    report FAIL "$name" start-offsets "ffprobe failed"
+  fi
+
+  # (6c) video SAR/DAR must equal the source; SKIP when the source has none.
+  if probe "$dir/src.aspect" -select_streams v:0 -show_entries stream=sample_aspect_ratio,display_aspect_ratio -of csv=p=0 "$file" &&
+    probe "$dir/out.aspect" -select_streams v:0 -show_entries stream=sample_aspect_ratio,display_aspect_ratio -of csv=p=0 "$out"; then
+    msg="$(python3 "$tmp/helpers.py" aspect "$dir/src.aspect" "$dir/out.aspect")"
+    rc=$?
+    case "$rc" in
+      0) report PASS "$name" aspect "$msg" ;;
+      3) report SKIP "$name" aspect "$msg" ;;
+      *) report FAIL "$name" aspect "$msg" ;;
+    esac
+  else
+    report FAIL "$name" aspect "ffprobe failed"
+  fi
+
+  # (6d) language tags per stream, in order; compared only where the source
+  # tags a stream; SKIP when the source has no language tags at all.
+  if probe "$dir/src.lang" -show_entries stream=index:stream_tags=language -of csv=p=0 "$file" &&
+    probe "$dir/out.lang" -show_entries stream=index:stream_tags=language -of csv=p=0 "$out"; then
+    msg="$(python3 "$tmp/helpers.py" lang "$dir/src.lang" "$dir/out.lang")"
+    rc=$?
+    case "$rc" in
+      0) report PASS "$name" lang "$msg" ;;
+      3) report SKIP "$name" lang "$msg" ;;
+      *) report FAIL "$name" lang "$msg" ;;
+    esac
+  else
+    report FAIL "$name" lang "ffprobe failed"
   fi
 
   # (7a) decoded video: framemd5 md5 sequences identical.
