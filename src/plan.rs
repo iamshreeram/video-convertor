@@ -224,19 +224,35 @@ fn audio_timing<'a, S: Source>(t: &'a MkvTrack, src: &mut S) -> Result<Prep<Audi
     let n = t.samples.len();
     let ts = prep.timescale;
 
+    // Matroska: CodecDelay MUST be subtracted from each Block timestamp (ffmpeg does this).
+    let delay = match t.codec_delay_ns {
+        Some(d) => i64::try_from(d).map_err(|_| too_large("codec delay exceeds 64 bits"))?,
+        None => 0,
+    };
+    let mut eff = with_capacity::<i64>(n)?;
+    for s in &t.samples {
+        eff.push(checked(s.pts_ns.checked_sub(delay))?);
+    }
+
     let mut order = with_capacity::<usize>(n)?;
     order.extend(0..n);
-    order.sort_by_key(|&i| t.samples.get(i).map_or(i64::MAX, |s| s.pts_ns));
+    order.sort_by_key(|&i| eff.get(i).copied().unwrap_or(i64::MAX));
     let first_idx = order
         .first()
         .copied()
         .ok_or_else(|| invalid("audio track has no samples"))?;
-    let min_pts = sample_by_index(t, first_idx)?.pts_ns;
+    let min_pts = eff
+        .get(first_idx)
+        .copied()
+        .ok_or_else(|| invalid("internal: sample index out of range"))?;
 
     let mut units = with_capacity::<i64>(n)?;
     for &idx in &order {
-        let s = sample_by_index(t, idx)?;
-        units.push(conv(i128::from(s.pts_ns) - i128::from(min_pts), ts)?);
+        let e = eff
+            .get(idx)
+            .copied()
+            .ok_or_else(|| invalid("internal: sample index out of range"))?;
+        units.push(conv(i128::from(e) - i128::from(min_pts), ts)?);
     }
 
     // Single normalisation formula (DESIGN "AUDIO").

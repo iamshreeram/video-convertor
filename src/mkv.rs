@@ -93,7 +93,7 @@ pub fn scan_with_limits<S: Source>(
     limits: &Limits,
 ) -> Result<Mkv> {
     let len = src.len();
-    let mut window = BufferedSource::new(Borrowed(src), WINDOW);
+    let mut window = BufferedSource::new_adaptive(&mut *src, READ_MIN_WINDOW, READ_MAX_WINDOW);
     let mut scanner = Scanner::new(limits.max_samples);
     let truncated = scanner.run(&mut window, progress)?;
     let mkv = scanner.into_mkv(truncated)?;
@@ -103,8 +103,9 @@ pub fn scan_with_limits<S: Source>(
 
 // ------------------------------------------------------------------ constants
 
-/// Read-ahead window for header reads.
-const WINDOW: usize = 1 << 20;
+/// Read-ahead window bounds for header reads: small after a jump, growing while sequential.
+const READ_MIN_WINDOW: usize = 4096;
+const READ_MAX_WINDOW: usize = 1 << 20;
 /// Progress is reported at most once per this many bytes of file position.
 const PROGRESS_STEP: u64 = 1 << 20;
 /// Maximum number of simultaneously open containers.
@@ -175,19 +176,6 @@ fn try_push<T>(v: &mut Vec<T>, x: T) -> Result<()> {
     }
     v.push(x);
     Ok(())
-}
-
-/// Adapter so `BufferedSource` can wrap a caller-owned `&mut S`.
-struct Borrowed<'a, S: Source>(&'a mut S);
-
-impl<S: Source> Source for Borrowed<'_, S> {
-    fn len(&self) -> u64 {
-        self.0.len()
-    }
-
-    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
-        self.0.read_at(offset, buf)
-    }
 }
 
 /// Reads one element header at `pos`, never past `limit`.

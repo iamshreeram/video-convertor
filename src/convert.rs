@@ -31,22 +31,26 @@ pub struct ConvertReport {
 
 /// Converts `src` (MKV) to MP4 written into `sink`. `progress` is monotone in [0,1], ends at 1.0 on success.
 pub fn convert<S: Source, K: Sink>(
-    src: S,
+    mut src: S,
     sink: &mut K,
     opts: &ConvertOptions,
     progress: &mut dyn FnMut(f64),
 ) -> Result<ConvertReport> {
-    let mut input = BufferedSource::new(src, READ_WINDOW_BYTES);
     let mut reporter = Progress {
         last: f64::NEG_INFINITY,
         inner: progress,
     };
     reporter.report(0.0);
 
-    let mkv = scan(&mut input, &mut |pos, len| {
+    // scan wraps the source in its own adaptive window; no extra layer here.
+    let mkv = scan(&mut src, &mut |pos, len| {
         reporter.report(scan_fraction(pos, len))
     })?;
-    let plan = build_plan(&mkv, &mut input)?;
+    // Plan phase: only tiny header reads, so a small adaptive window suffices.
+    let plan = {
+        let mut plan_src = BufferedSource::new_adaptive(&mut src, 4096, 1 << 20);
+        build_plan(&mkv, &mut plan_src)?
+    };
 
     // Exact size check before anything reaches the sink. The header is rebuilt inside
     // write_mp4; only the size is kept here so the two copies never coexist.
@@ -59,7 +63,9 @@ pub fn convert<S: Source, K: Sink>(
         }
     }
 
-    let output_size = write_mp4(&plan, &mut input, sink, &mut |done, total| {
+    // Write phase: slice reads are at most 1 MiB; the 4 MiB window absorbs the A/V interleave.
+    let mut write_src = BufferedSource::new(&mut src, READ_WINDOW_BYTES);
+    let output_size = write_mp4(&plan, &mut write_src, sink, &mut |done, total| {
         reporter.report(write_fraction(done, total))
     })?;
     reporter.report(1.0);
