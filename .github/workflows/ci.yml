@@ -156,10 +156,14 @@ jobs:
             build_type="not enabled"
           fi
           echo "build_type=${build_type}" >> "$GITHUB_OUTPUT"
-          if [ "${build_type}" != "workflow" ]; then
-            msg="GitHub Pages is not set up for this repository (found: ${build_type}). Open Settings > Pages > Build and deployment > Source and choose 'GitHub Actions', then re-run this workflow. Alternative: choose 'Deploy from a branch' with branch gh-pages and folder / (root); the built site is already there."
-            echo "::warning title=Pages deployment skipped::${msg}"
-            echo "### Pages deployment skipped" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${build_type}" = "legacy" ]; then
+            # Pages is serving the gh-pages branch directly, which CI has just updated.
+            echo "::notice title=Pages serves the gh-pages branch::Nothing more to deploy; the site updates from the gh-pages branch."
+            echo "### Pages is served from the gh-pages branch" >> "$GITHUB_STEP_SUMMARY"
+          elif [ "${build_type}" != "workflow" ]; then
+            msg="GitHub Pages is not set up for this repository (found: ${build_type}). Open Settings > Pages > Build and deployment > Source and choose either 'GitHub Actions', or 'Deploy from a branch' with branch gh-pages and folder / (root); the built site is already on that branch."
+            echo "::warning title=Pages is not enabled::${msg}"
+            echo "### Pages is not enabled" >> "$GITHUB_STEP_SUMMARY"
             echo "${msg}" >> "$GITHUB_STEP_SUMMARY"
           fi
 
