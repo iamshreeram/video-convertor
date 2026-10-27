@@ -152,7 +152,9 @@ jobs:
         run: |
           # The built site is already on the gh-pages branch at this point, so a
           # missing Pages setting must not turn the whole run red with a stack trace.
-          build_type="$(gh api "repos/${GITHUB_REPOSITORY}/pages" --jq .build_type 2>/dev/null || echo missing)"
+          if ! build_type="$(gh api "repos/${GITHUB_REPOSITORY}/pages" --jq .build_type 2>/dev/null)"; then
+            build_type="not enabled"
+          fi
           echo "build_type=${build_type}" >> "$GITHUB_OUTPUT"
           if [ "${build_type}" != "workflow" ]; then
             msg="GitHub Pages is not set up for this repository (found: ${build_type}). Open Settings > Pages > Build and deployment > Source and choose 'GitHub Actions', then re-run this workflow. Alternative: choose 'Deploy from a branch' with branch gh-pages and folder / (root); the built site is already there."
