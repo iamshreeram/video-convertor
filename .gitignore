@@ -11,3 +11,4 @@ target
 *.wasm
 *.log
 /tmp
+e2e/package-lock.json
