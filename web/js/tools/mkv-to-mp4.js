@@ -11,10 +11,12 @@ import { h } from "../core/dom.js";
 import { icon } from "../core/icons.js";
 import { buildDiagnostics, logDiagnostics } from "../core/diagnostics.js";
 import { describeError } from "../core/errors.js";
+import { classifyFolderFailure, createOutputFile, mp4Name } from "../core/destination.js";
 import { createMeter, formatBytes } from "../core/format.js";
 import { createMemoryBudget } from "../core/memory-budget.js";
 import { createConvertWorker } from "../core/worker-factory.js";
 import { createQueue } from "../queue/queue.js";
+import { createDestinationBar } from "../ui/destination-bar.js";
 import { createDropzone } from "../ui/dropzone.js";
 import { createJobList } from "../ui/job-list.js";
 import { createJobCard } from "../ui/job-card.js";
@@ -45,13 +47,6 @@ function workerHooks(params) {
     return { bootstrapSource: "/* never signals ready */", readyTimeoutMs: ms > 0 ? ms : 500 };
   }
   return null;
-}
-
-/** @param {unknown} name @returns {string} "<name without extension>.mp4" for the save dialog */
-function suggestedMp4Name(name) {
-  const raw = typeof name === "string" ? name : "";
-  const base = raw.replace(/[\\/]/g, "_").replace(/\.[^.]*$/, "");
-  return `${base || "output"}.mp4`;
 }
 
 /**
@@ -114,8 +109,13 @@ export async function mount(container, ctx) {
   /** Pushes storage, worker and memory facts to the About dialog. */
   function publishStorage() {
     if (typeof ctx.setStorageInfo !== "function") return;
+    const folderMode = destinationBar.state().mode === "folder";
     ctx.setStorageInfo({
-      storage: storageOnDisk ? "On-disk (browser private storage)" : "In memory",
+      storage: folderMode
+        ? "Written straight to the folder you chose"
+        : storageOnDisk
+          ? "On-disk (browser private storage)"
+          : "In memory",
       workerConfinement: workerStarted ? "active" : "not started yet",
       memoryBudget: `${formatBytes(budget.remaining())} free of ${formatBytes(budgetTotal)}`,
     });
@@ -203,6 +203,10 @@ export async function mount(container, ctx) {
       let worker = null;
       let finished = false;
       let meter = null;
+      // The file this job writes to: one picked with "Save to a file", or one created in the
+      // chosen folder when the job starts. Null means browser storage and a download.
+      let outputHandle = job.outputHandle ?? null;
+      let folderName = "";
 
       /** Detaches handlers and terminates the worker, if any. */
       const stop = () => {
@@ -234,7 +238,7 @@ export async function mount(container, ctx) {
         // The stable code comes from the same mapper the card uses, so both always agree.
         if (diag.error) diag.error.code = describeError(message).code;
         logDiagnostics("error", diag);
-        void removeIfEmpty(job.outputHandle);
+        void removeIfEmpty(outputHandle);
         jobCtx.update({ errorDetails: details ?? message, diagnostics: diag });
         reject(new Error(message));
       };
@@ -251,6 +255,7 @@ export async function mount(container, ctx) {
           resolve({
             saved: true,
             savedName: typeof msg.savedName === "string" ? msg.savedName : msg.outputName,
+            savedFolder: folderName,
             name: msg.outputName,
             size: Number.isFinite(msg.size) ? msg.size : 0,
             inMemory: false,
@@ -327,15 +332,35 @@ export async function mount(container, ctx) {
         finished = true;
         stop();
         scheduleCleanup(runId);
-        if (!wasFinished) void removeIfEmpty(job.outputHandle);
+        if (!wasFinished) void removeIfEmpty(outputHandle);
         if (!wasFinished) reject(new Error("Cancelled"));
       });
 
-      createConvertWorker(hooks ?? {}).then(
+      /** Creates this job's file in the chosen folder, unless a file was picked for it. */
+      const prepareOutput = async () => {
+        const folder = destinationBar.state();
+        if (outputHandle || folder.mode !== "folder") return;
+        const created = await createOutputFile(folder.dir, mp4Name(file.name));
+        outputHandle = created.handle;
+        folderName = folder.folderName;
+      };
+
+      prepareOutput()
+        .then(
+          () => createConvertWorker(hooks ?? {}),
+          (err) => {
+            const failure = classifyFolderFailure(err);
+            fail(failure.message);
+            return null;
+          },
+        )
+        .then(
         (started) => {
+          if (started === null) return;
           if (finished) {
             // Cancelled while the worker was still starting.
             started.terminate();
+            void removeIfEmpty(outputHandle);
             return;
           }
           worker = started;
@@ -369,7 +394,7 @@ export async function mount(container, ctx) {
             runId,
             inMemory: noFs || !caps.opfs,
             memoryBudgetBytes: budget.remaining(),
-            outputHandle: job.outputHandle,
+            outputHandle,
           });
         },
         (err) => fail(err?.message || "Could not start the conversion worker."),
@@ -396,7 +421,7 @@ export async function mount(container, ctx) {
     if (!job || job.state !== "error" || typeof window.showSaveFilePicker !== "function") return;
     window
       .showSaveFilePicker({
-        suggestedName: suggestedMp4Name(job.file && job.file.name),
+        suggestedName: mp4Name(job.file && job.file.name),
         types: [{ description: "MP4 video", accept: { "video/mp4": [".mp4"] } }],
       })
       .then(
@@ -471,6 +496,27 @@ export async function mount(container, ctx) {
   }
 
   // ---- view -----------------------------------------------------------------
+  const destinationBar = createDestinationBar({
+    storage: window.localStorage,
+    onChange: (state) => {
+      applyDestination(state);
+      publishStorage();
+      announce(
+        state.mode === "folder"
+          ? `Saving to the folder ${state.folderName}`
+          : "Converted files will be offered as downloads",
+      );
+    },
+    notify: (message) => {
+      if (typeof ctx.showToast === "function") ctx.showToast(message, { kind: "error" });
+    },
+  });
+
+  /** Files can only be added once the user has said where they go. @param {{mode: string}} state */
+  function applyDestination(state) {
+    dropzone.setDisabled(state.mode === "unset", "Choose where to save the converted files above first");
+  }
+
   const dropzone = createDropzone({
     accept: ACCEPT,
     multiple: true,
@@ -522,7 +568,16 @@ export async function mount(container, ctx) {
     ),
   );
 
-  const root = h("div", { class: "tool", dataset: { testid: "tool-mkv-to-mp4" } }, head, callout, dropzone.el, list.el);
+  const root = h(
+    "div",
+    { class: "tool", dataset: { testid: "tool-mkv-to-mp4" } },
+    head,
+    callout,
+    destinationBar.el,
+    dropzone.el,
+    list.el,
+  );
+  applyDestination(destinationBar.state());
   container.replaceChildren(root);
 
   const unsubscribe = queue.subscribe(render);

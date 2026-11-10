@@ -366,7 +366,21 @@ function framePerf() {
   }
 }
 
-const DEFAULT_INIT = [{ fn: spyWorkers }, { fn: cspRecorder }];
+// A returning visitor who chose normal downloads: the page does not ask for a folder first.
+// (A first visit would block the dropzone until a folder is chosen; T37-T40 cover that.)
+function rememberDownloads() {
+  try {
+    // once per tab, so a reload inside a test behaves like the visitor's next visit
+    if (!sessionStorage.getItem("__remembered_downloads")) {
+      sessionStorage.setItem("__remembered_downloads", "1");
+      localStorage.setItem("mkv2mp4.save-to", "browser");
+    }
+  } catch {
+    // about:blank has no storage
+  }
+}
+
+const DEFAULT_INIT = [{ fn: spyWorkers }, { fn: cspRecorder }, { fn: rememberDownloads }];
 
 function watchPage(page, env) {
   page.on("console", (msg) => {
@@ -2331,6 +2345,263 @@ async function testT35(env) {
   return "no button for a damaged file or without showSaveFilePicker; error text still present";
 }
 
+// ---------- T37-T40: ask for a save folder first, then write every file straight into it ----------
+
+// The folder dialog is native, so tests replace showDirectoryPicker with a function returning a
+// directory in the browser's private storage (a real FileSystemDirectoryHandle). "denied" returns a
+// stand-in whose files cannot be created, like a folder whose permission was lost.
+const DIR_PICKER_PATCH = {
+  fn: () => {
+    window.__dirPicker = { mode: "ok", calls: [] };
+    window.showDirectoryPicker = async (options) => {
+      const picker = window.__dirPicker;
+      picker.calls.push({
+        id: options?.id ?? null,
+        mode: options?.mode ?? null,
+        active: navigator.userActivation ? navigator.userActivation.isActive : null,
+      });
+      if (picker.mode === "abort") {
+        throw new DOMException("The user aborted a request.", "AbortError");
+      }
+      if (picker.mode === "denied") {
+        return {
+          kind: "directory",
+          name: "locked-folder",
+          getFileHandle: async (name, options) => {
+            if (options?.create) throw new DOMException("Permission was lost", "NotAllowedError");
+            throw new DOMException("not found", "NotFoundError");
+          },
+        };
+      }
+      const root = await navigator.storage.getDirectory();
+      return root.getDirectoryHandle("dest-folder", { create: true });
+    };
+  },
+};
+
+// Forgets the remembered download choice, once per tab, so a test sees a first visit.
+const FIRST_VISIT = {
+  fn: () => {
+    try {
+      if (!sessionStorage.getItem("__first_visit_done")) {
+        sessionStorage.setItem("__first_visit_done", "1");
+        localStorage.removeItem("mkv2mp4.save-to");
+      }
+    } catch {
+      // about:blank has no storage
+    }
+  },
+};
+
+async function firstVisitPage(env, extraInit = []) {
+  const context = await newContext(env, [DIR_PICKER_PATCH, PICKER_PATCH, FIRST_VISIT, ...extraInit]);
+  return openPageIn(env, context, shared.root);
+}
+
+const dirPickerCalls = (page) => page.evaluate(() => window.__dirPicker.calls);
+const barMode = (page) => page.locator(testid("destination")).getAttribute("data-mode");
+const inputDisabled = (page) => page.locator(testid("file-input")).isDisabled();
+
+async function opfsDirNames(page, dirName) {
+  return page.evaluate(async (name) => {
+    const root = await navigator.storage.getDirectory();
+    let dir;
+    try {
+      dir = await root.getDirectoryHandle(name);
+    } catch {
+      return [];
+    }
+    const names = [];
+    for await (const [entry] of dir.entries()) names.push(entry);
+    return names.sort();
+  }, dirName);
+}
+
+async function readOpfsDirFile(page, dirName, name) {
+  const b64 = await page.evaluate(
+    async ([d, n]) => {
+      const root = await navigator.storage.getDirectory();
+      const dir = await root.getDirectoryHandle(d);
+      const file = await (await dir.getFileHandle(n)).getFile();
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      let text = "";
+      for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      return btoa(text);
+    },
+    [dirName, name],
+  );
+  return Buffer.from(b64, "base64");
+}
+
+async function testT37(env) {
+  const src = fixture("h264_aac");
+  const refPage = await openApp(env, { url: shared.root });
+  const ref = await convertOne(refPage, src);
+  await expectDone(refPage, ref.pick, ref.state);
+  const refFile = path.join(WORK, "t37-ref.mp4");
+  await downloadFrom(refPage, ref.pick, refFile);
+
+  // first visit: nothing can be added until a folder is chosen
+  const page = await firstVisitPage(env);
+  assert((await barMode(page)) === "unset", `bar mode ${await barMode(page)}`);
+  assert(await inputDisabled(page), "files can be added before a folder is chosen");
+  const sub = (await page.locator(testid("dropzone-sub")).textContent()).trim();
+  assert(/Choose where to save/.test(sub), `dropzone hint "${sub}"`);
+
+  await page.locator(testid("destination-choose")).click();
+  await waitUntil(async () => (await barMode(page)) === "folder", 10000, "the bar never switched to folder mode");
+  const calls = await dirPickerCalls(page);
+  assert(calls.length === 1 && calls[0].id === "mkv2mp4-output" && calls[0].mode === "readwrite", `picker call ${JSON.stringify(calls)}`);
+  assert(calls[0].active === true, "the folder dialog was opened without an active user gesture");
+  assert((await page.locator(testid("destination-name")).textContent()) === "dest-folder", "folder name not shown");
+  assert(!(await inputDisabled(page)), "the dropzone is still disabled after choosing a folder");
+
+  // two conversions of the same file: neither may replace the other
+  const one = await convertOne(page, src);
+  await expectDone(page, one.pick, one.state);
+  const two = await convertOne(page, src);
+  await expectDone(page, two.pick, two.state);
+  const note1 = await cardText(page, one.pick, testid("job-saved-note"));
+  const note2 = await cardText(page, two.pick, testid("job-saved-note"));
+  assert(/Saved to the folder dest-folder as h264_aac\.mp4\./.test(note1), `note 1 "${note1}"`);
+  assert(/Saved to the folder dest-folder as h264_aac \(1\)\.mp4\./.test(note2), `note 2 "${note2}"`);
+  for (const pick of [one.pick, two.pick]) {
+    const card = cardOf(page, pick);
+    assert((await card.locator(testid("job-download")).count()) === 0, "a Download link is shown for a saved file");
+  }
+  assert((await opfsOutNames(page)).length === 0, "the browser-storage path was used although a folder was chosen");
+  const names = await opfsDirNames(page, "dest-folder");
+  assert(JSON.stringify(names) === JSON.stringify(["h264_aac (1).mp4", "h264_aac.mp4"]), `folder holds ${JSON.stringify(names)}`);
+  const refSha = await sha256File(refFile);
+  for (const name of names) {
+    const dest = path.join(WORK, `t37-${name.replace(/[^a-z0-9.]/gi, "_")}`);
+    fs.writeFileSync(dest, await readOpfsDirFile(page, "dest-folder", name));
+    assert((await sha256File(dest)) === refSha, `${name} differs from the normal conversion`);
+  }
+  const { problems } = await verifyOutput(src, path.join(WORK, "t37-h264_aac.mp4"), null);
+  assert(problems.length === 0, problems.join("; "));
+
+  // removing a card never deletes the user's file
+  await cardOf(page, one.pick).locator(testid("job-remove")).click();
+  await sleep(500);
+  assert((await opfsDirNames(page, "dest-folder")).length === 2, "removing a card deleted a saved file");
+
+  // the folder is not remembered across visits: ask again
+  await page.reload({ waitUntil: "load" });
+  await waitForState(page, ["ready"], 30000);
+  assert((await barMode(page)) === "unset", `after reload: ${await barMode(page)}`);
+  return "asked first, folder shown, two same-named files kept side by side, byte-identical, asked again next visit";
+}
+
+async function testT38(env) {
+  const src = fixture("h264_aac");
+  const page = await firstVisitPage(env);
+
+  // closing the dialog changes nothing
+  await setDirPickerMode(page, "abort");
+  await page.locator(testid("destination-choose")).click();
+  await sleep(500);
+  assert((await barMode(page)) === "unset" && (await inputDisabled(page)), "cancelling the folder dialog changed the page");
+
+  // normal downloads: remembered, files can be added, result is a download
+  await page.locator(testid("destination-browser")).click();
+  assert((await barMode(page)) === "browser" && !(await inputDisabled(page)), "downloads mode not active");
+  await page.reload({ waitUntil: "load" });
+  await waitForState(page, ["ready"], 30000);
+  assert((await barMode(page)) === "browser", "the download choice was not remembered");
+  const done = await convertOne(page, src);
+  await expectDone(page, done.pick, done.state);
+  assert((await cardOf(page, done.pick).locator(testid("job-download")).count()) === 1, "no Download link in downloads mode");
+  assert((await cardOf(page, done.pick).locator(testid("job-saved-note")).count()) === 0, "saved note in downloads mode");
+
+  // switching to a folder later is one click
+  await setDirPickerMode(page, "ok");
+  await page.locator(testid("destination-choose")).click();
+  await waitUntil(async () => (await barMode(page)) === "folder", 10000, "no switch to folder mode");
+  const next = await convertOne(page, src);
+  await expectDone(page, next.pick, next.state);
+  assert(/Saved to the folder dest-folder/.test(await cardText(page, next.pick, testid("job-saved-note"))), "second file not saved to the folder");
+  // and back
+  await page.locator(testid("destination-browser")).click();
+  assert((await barMode(page)) === "browser", "could not go back to downloads");
+  return "dialog cancelled -> unchanged; downloads choice remembered; folder and downloads can be switched any time";
+}
+
+async function setDirPickerMode(page, mode) {
+  await page.evaluate((m) => {
+    window.__dirPicker.mode = m;
+  }, mode);
+}
+
+async function testT39(env) {
+  const page = await firstVisitPage(env);
+  await setDirPickerMode(page, "denied");
+  await page.locator(testid("destination-choose")).click();
+  await waitUntil(async () => (await barMode(page)) === "folder", 10000, "no folder mode");
+  const failed = await convertOne(page, fixture("h264_aac"));
+  assert(failed.state === "error", `expected an error, got ${failed.state}`);
+  const code = (await cardOf(page, failed.pick).locator(testid("job-error-code")).textContent()).trim();
+  assert(code === "SAVE_DENIED", `code ${code}`);
+  const details = await cardText(page, failed.pick, `${testid("job-error-details")} code`);
+  assert(/^save denied: NotAllowedError/.test(details), `details "${details}"`);
+  // the way out: pick one file instead
+  await clickSaveToFile(page, failed.pick);
+  const state = await waitSaveRun(page, failed.pick);
+  await expectDone(page, failed.pick, state);
+  const note = await cardText(page, failed.pick, testid("job-saved-note"));
+  assert(/Saved to disk as saved-1\.mp4/.test(note), `note "${note}"`);
+  return "lost folder permission -> SAVE_DENIED with the browser's error; 'Save to a file' recovers";
+}
+
+// Big file: cancelled while writing into the chosen folder, then saved completely.
+async function testT40(env) {
+  const base = await ensureSample("big_storage", [
+    "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=25",
+    "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+    "-t", "450", "-c:v", "libx264", "-preset", "ultrafast", "-b:v", "24M", "-maxrate", "24M", "-bufsize", "48M",
+    "-c:a", "aac", "-b:a", "128k",
+  ]);
+  const page = await firstVisitPage(env);
+  await page.locator(testid("destination-choose")).click();
+  await waitUntil(async () => (await barMode(page)) === "folder", 10000, "no folder mode");
+  const before = await cardCount(page);
+  await addFiles(page, [base]);
+  const pick = { index: before };
+  await waitUntil(
+    async () => Number(await cardOf(page, pick).locator(testid("job-progress")).getAttribute("aria-valuenow")) >= 5,
+    300000,
+    "the save never reached 5 %",
+    50,
+  );
+  const during = await opfsDirNames(page, "dest-folder");
+  assert(during.length >= 1, `no file in the folder while converting: ${JSON.stringify(during)} (card ${await stateOfPick(page, pick)})`);
+  await cardOf(page, pick).locator(testid("job-cancel")).click();
+  assert((await waitCard(page, pick, ["cancelled"], 15000)) === "cancelled", "not cancelled");
+  await waitUntil(
+    async () => (await opfsDirNames(page, "dest-folder")).length === 0,
+    30000,
+    `a partial file was left in the folder: ${JSON.stringify(await opfsDirNames(page, "dest-folder"))}`,
+    250,
+  );
+
+  const full = await convertOne(page, base, 600000);
+  await expectDone(page, full.pick, full.state);
+  const names = await opfsDirNames(page, "dest-folder");
+  assert(names.length === 1 && names[0] === "big_storage.mp4", `folder holds ${JSON.stringify(names)}`);
+  const size = await page.evaluate(async () => {
+    const root = await navigator.storage.getDirectory();
+    const dir = await root.getDirectoryHandle("dest-folder");
+    return (await (await dir.getFileHandle("big_storage.mp4")).getFile()).size;
+  });
+  const inputSize = fs.statSync(base).size;
+  assert(Math.abs(size - inputSize) / inputSize < 0.02, `saved ${size} B from a ${inputSize} B input`);
+  await page.evaluate(async () => {
+    const root = await navigator.storage.getDirectory();
+    await root.removeEntry("dest-folder", { recursive: true });
+  });
+  return `cancel left the folder empty; full ${(size / 2 ** 20).toFixed(0)} MiB save landed as big_storage.mp4`;
+}
+
 const TESTS = [
   { id: "T1", title: "OPFS convert h264_aac at /video-convertor/ (chips, download, ffprobe, preview)", timeoutMs: 300000, run: testT1 },
   { id: "T2", title: "in-memory sink (?nofs=1) gives the same bytes, no OPFS files", timeoutMs: 300000, run: testT2 },
@@ -2368,6 +2639,10 @@ const TESTS = [
   { id: "T33", title: "save dialog cancelled -> card unchanged; unwritable file -> SAVE_FAILED; next try works", timeoutMs: 300000, run: testT33 },
   { id: "T34", title: "big file to a chosen file: cancel leaves nothing behind; a full save completes with the size verified", big: true, timeoutMs: 1800000, run: testT34 },
   { id: "T35", title: "Save-to-file button only where it can help (not for damaged files, not without the save dialog)", timeoutMs: 300000, run: testT35 },
+  { id: "T37", title: "first visit: asks for a folder before files can be added; every file lands in it under a free name, byte-identical", timeoutMs: 300000, run: testT37 },
+  { id: "T38", title: "folder dialog cancelled -> unchanged; 'normal downloads' is remembered; folder and downloads switchable", timeoutMs: 300000, run: testT38 },
+  { id: "T39", title: "folder permission lost -> SAVE_DENIED, and 'Save to a file' recovers", timeoutMs: 300000, run: testT39 },
+  { id: "T40", title: "big file into the chosen folder: cancel leaves the folder empty; a full save completes", big: true, timeoutMs: 1800000, run: testT40 },
 ];
 
 // ---------- main ----------

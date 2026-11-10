@@ -199,9 +199,12 @@ async function runProcess(msg) {
       postMessage({ type: "progress", fraction: 1 });
       rec.begin("finalize");
       postMessage({ type: "stage", stage: "finalizing" });
-      opfs.access.flush();
+      // No flush(): it forces the whole file onto the physical disk (on Windows a multi-second
+      // wait for a multi-GB result) and buys nothing for a temporary file that the page reads
+      // straight away from the system cache. The stages below time each step separately.
       opfs.access.close();
       opfs.access = null;
+      rec.begin("open-result");
       result = await opfs.handle.getFile();
     } else {
       const chunks = [];
@@ -336,6 +339,7 @@ async function saveToChosenFile(ctx) {
   state.writable = null;
 
   // The file on disk must be exactly what was written; a mismatch is reported, never hidden.
+  rec.begin("verify");
   let size = null;
   try {
     size = (await handle.getFile()).size;

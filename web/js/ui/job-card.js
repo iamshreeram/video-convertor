@@ -38,7 +38,7 @@ const STATE_INFO = {
     label: "Finalizing",
     tone: "info",
     iconName: "layers",
-    stage: "Finalizing the file\u2026",
+    stage: "Finalizing the file\u2026 the browser is finishing the write, which can take a while for large files",
     progressLabel: "Converting",
   },
   done: { label: "Done", tone: "success", iconName: "check", stage: "Finished", progressLabel: "Converting" },
@@ -170,6 +170,7 @@ export function createJobCard(job, { onCancel, onRemove, onSaveToFile } = {}) {
   let currentName = "";
   let currentCode = "";
   let savedName = "";
+  let savedFolder = "";
 
   // ---- static skeleton --------------------------------------------------
   const nameEl = h("span", { class: "job__name", dataset: { testid: "job-name" } });
@@ -274,11 +275,13 @@ export function createJobCard(job, { onCancel, onRemove, onSaveToFile } = {}) {
 
   // Shown instead of Download when the converted file was written straight to a file the user chose.
   const savedNameEl = h("strong", { dataset: { testid: "job-saved-name" } });
+  const savedFolderEl = h("strong", { dataset: { testid: "job-saved-folder" } });
+  const savedTextEl = h("span");
   const savedEl = h(
     "p",
     { class: "job__saved", dataset: { testid: "job-saved-note" } },
     icon("check", { size: 16 }),
-    h("span", {}, "Saved to disk as ", savedNameEl, "."),
+    savedTextEl,
   );
 
   const extrasEl = h("div", { class: "job__extras" });
@@ -545,7 +548,16 @@ export function createJobCard(job, { onCancel, onRemove, onSaveToFile } = {}) {
     const result = job.result && typeof job.result === "object" ? job.result : null;
     const url = result ? safeUrl(result.url) : null;
     savedName = result && result.saved === true && typeof result.savedName === "string" ? result.savedName : "";
-    if (savedName) setText(savedNameEl, savedName);
+    savedFolder = result && result.saved === true && typeof result.savedFolder === "string" ? result.savedFolder : "";
+    if (savedName) {
+      setText(savedNameEl, savedName);
+      setText(savedFolderEl, savedFolder);
+      savedTextEl.replaceChildren(
+        ...(savedFolder
+          ? ["Saved to the folder ", savedFolderEl, " as ", savedNameEl, "."]
+          : ["Saved to disk as ", savedNameEl, "."]),
+      );
+    }
 
     setAttr(el, "data-state", base);
     setAttr(el, "data-name", name);

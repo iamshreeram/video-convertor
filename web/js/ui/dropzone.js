@@ -39,7 +39,7 @@ function carriesFiles(event) {
 
 /**
  * @param {{accept?: string, multiple?: boolean, onFiles?: (files: File[]) => void}} options
- * @returns {{el: HTMLElement, setDisabled: (disabled: boolean) => void, focus: () => void}}
+ * @returns {{el: HTMLElement, setDisabled: (disabled: boolean, reason?: string) => void, focus: () => void}}
  */
 export function createDropzone({ accept = "", multiple = true, onFiles } = {}) {
   let disabled = false;
@@ -56,6 +56,9 @@ export function createDropzone({ accept = "", multiple = true, onFiles } = {}) {
       "aria-hidden": "true",
     },
   });
+
+  const SUB_TEXT = "or browse \u2014 H.264 / H.265 / AV1 video with AAC, MP3, Opus, FLAC or AC-3 audio";
+  const subEl = h("p", { class: "dropzone__sub", dataset: { testid: "dropzone-sub" } }, SUB_TEXT);
 
   const browse = h(
     "button",
@@ -120,11 +123,7 @@ export function createDropzone({ accept = "", multiple = true, onFiles } = {}) {
       icon("upload", { size: 28 }),
     ),
     h("h2", { class: "dropzone__title", attrs: { id: titleId }, text: "Drop MKV files here" }),
-    h(
-      "p",
-      { class: "dropzone__sub" },
-      "or browse \u2014 H.264 / H.265 / AV1 video with AAC, MP3, Opus, FLAC or AC-3 audio",
-    ),
+    subEl,
     browse,
     input,
   );
@@ -139,9 +138,11 @@ export function createDropzone({ accept = "", multiple = true, onFiles } = {}) {
   /**
    * Enables or disables the zone. Disabled: muted, ignores drops and clicks.
    * @param {boolean} value
+   * @param {string} [reason] shown instead of the usual hint while disabled
    */
-  function setDisabled(value) {
+  function setDisabled(value, reason) {
     disabled = Boolean(value);
+    subEl.textContent = disabled && reason ? reason : SUB_TEXT;
     el.classList.toggle("is-disabled", disabled);
     browse.disabled = disabled;
     input.disabled = disabled;
