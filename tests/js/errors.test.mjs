@@ -27,6 +27,31 @@ test("describeError maps engine messages to friendly titles with hints and keeps
   assert.equal(describeError(new Error("invalid Matroska file: x")).title, "This doesn’t look like an MKV or WebM file");
 });
 
+test("damaged files get a 'damaged' explanation instead of the 'not an MKV' one", () => {
+  const msg =
+    "invalid Matroska file: invalid EBML element ID at offset 123456 (inside element 0x18538067); next bytes: 00 00 00 00 00 00 00 00; no media data could be found";
+  const d = describeError(msg);
+  assert.equal(d.title, "This MKV file looks damaged");
+  assert.match(d.hint, /offset 123456/);
+  assert.equal(d.details, msg);
+  // a genuinely foreign file keeps the original wording
+  assert.equal(
+    describeError("invalid Matroska file: not a Matroska/WebM file").title,
+    "This doesn’t look like an MKV or WebM file",
+  );
+});
+
+test("describeWarning explains skipped and ignored damaged data", () => {
+  assert.match(
+    describeWarning("skipped 4096 bytes of unreadable data in 2 place(s), first at offset 900"),
+    /^Damaged parts of the file were skipped \(4096 bytes\)/,
+  );
+  assert.match(
+    describeWarning("ignored 65536 bytes of unreadable data at the end of the file (from offset 99)"),
+    /^The end of the file was unreadable \(65536 bytes\) and was ignored/,
+  );
+});
+
 test("describeWarning rewrites known engine warnings and passes unknown ones through", () => {
   assert.equal(describeWarning("track 3 (A_DTS) skipped: unsupported codec"), "Skipped track 3 (A_DTS): unsupported codec");
   assert.equal(describeWarning("file appears truncated; trailing data ignored"), "The file looks cut off; the readable part was converted.");

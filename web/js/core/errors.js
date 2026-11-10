@@ -10,6 +10,22 @@ const DEFAULT_HINT =
 /** Ordered rules: first matching prefix wins. */
 const RULES = [
   {
+    // Valid MKV header but no readable media (zeros/garbage where data should be).
+    prefix: "invalid Matroska file",
+    contains: "no media data could be found",
+    title: "This MKV file looks damaged",
+    hint: "",
+    hintFor: (details) => {
+      const at = /at offset (\d+)/.exec(details);
+      const where = at ? ` (unreadable data starts at offset ${at[1]})` : "";
+      return (
+        "The file has an MKV header but its video data could not be read" +
+        where +
+        ". If it was downloaded or recorded, it may be incomplete or corrupted; try downloading it again."
+      );
+    },
+  },
+  {
     prefix: "invalid Matroska file",
     title: "This doesn\u2019t look like an MKV or WebM file",
     hint: "Choose an MKV or WebM file. Files renamed from another format will not convert.",
@@ -70,7 +86,7 @@ function messageText(messageOrError) {
 export function describeError(messageOrError) {
   const details = messageText(messageOrError);
   for (const rule of RULES) {
-    if (details.startsWith(rule.prefix)) {
+    if (details.startsWith(rule.prefix) && (!rule.contains || details.includes(rule.contains))) {
       const hint = rule.hintFor ? rule.hintFor(details) : rule.hint;
       return { title: rule.title, hint, details };
     }
@@ -87,6 +103,20 @@ export function describeWarning(text) {
   if (typeof text !== "string") return "";
   const skipped = /^track (\d+) \((.*?)\) skipped: (.*)$/.exec(text);
   if (skipped) return `Skipped track ${skipped[1]} (${skipped[2]}): ${skipped[3]}`;
+  const skippedData = /^skipped (\d+) bytes of unreadable data/.exec(text);
+  if (skippedData) {
+    return (
+      `Damaged parts of the file were skipped (${skippedData[1]} bytes). ` +
+      "The rest was converted; there may be a short glitch where data was missing."
+    );
+  }
+  const ignoredTail = /^ignored (\d+) bytes of unreadable data at the end/.exec(text);
+  if (ignoredTail) {
+    return (
+      `The end of the file was unreadable (${ignoredTail[1]} bytes) and was ignored. ` +
+      "This usually means an unfinished download or recording; everything readable was converted."
+    );
+  }
   if (text.startsWith("file appears truncated")) {
     return "The file looks cut off; the readable part was converted.";
   }

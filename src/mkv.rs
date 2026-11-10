@@ -129,6 +129,14 @@ const MAX_BLOCK_HEADER: usize = 8 + 3;
 const DEFAULT_TIMECODE_SCALE: u64 = 1_000_000;
 const DEFAULT_SAMPLING_FREQUENCY: f64 = 8000.0;
 const TRUNCATED_WARNING: &str = "file appears truncated; trailing data ignored";
+/// How far past unreadable data the scanner looks for the next Cluster (zero-filled tails of
+/// preallocated/partial downloads are ignored beyond this).
+const RESYNC_WINDOW: u64 = 256 << 20;
+/// Upper bound on separate damaged regions skipped in one file.
+const MAX_RESYNCS: usize = 64;
+const RESYNC_CHUNK: usize = 1 << 20;
+/// Level-2 elements that may open a Cluster (used to validate a resync candidate).
+const CLUSTER_CHILD_IDS: [u32; 7] = [0xE7, 0xA3, 0xA0, 0xA7, 0xAB, 0xEC, 0xBF];
 
 const ID_EBML: u32 = 0x1A45_DFA3;
 const ID_DOCTYPE: u32 = 0x4282;
@@ -227,6 +235,65 @@ fn read_bounded<B: Source>(
         src.read_at(offset, &mut buf)?;
     }
     Ok(buf)
+}
+
+/// Finds the next plausible Cluster start in `[from, to)`: the 4-byte Cluster ID, a valid size
+/// that fits the file, and a known Cluster child directly after the header. `file_len` bounds the
+/// validation reads. Reads are sequential 1 MiB chunks, so the cost is bounded by `to - from`.
+fn find_cluster<B: Source>(src: &mut B, from: u64, to: u64, file_len: u64) -> Result<Option<u64>> {
+    let id = ID_CLUSTER.to_be_bytes();
+    let mut buf = vec![0u8; RESYNC_CHUNK + id.len() - 1];
+    let mut pos = from;
+    while pos < to {
+        let n = (to - pos + (id.len() as u64 - 1)).min(buf.len() as u64) as usize;
+        let n = n.min(file_len.saturating_sub(pos) as usize);
+        if n < id.len() {
+            break;
+        }
+        let chunk = buf
+            .get_mut(..n)
+            .ok_or_else(|| Error::Io("resync buffer".into()))?;
+        src.read_at(pos, chunk)?;
+        let mut i = 0;
+        while i + id.len() <= n {
+            match chunk[i..].iter().position(|b| *b == id[0]) {
+                None => break,
+                Some(off) => i += off,
+            }
+            if i + id.len() > n {
+                break;
+            }
+            if chunk[i..i + id.len()] == id {
+                let cand = pos + i as u64;
+                if cluster_candidate_ok(src, cand, file_len)? {
+                    return Ok(Some(cand));
+                }
+            }
+            i += 1;
+        }
+        let advanced = (n as u64).saturating_sub(id.len() as u64 - 1).max(1);
+        pos += advanced;
+    }
+    Ok(None)
+}
+
+fn cluster_candidate_ok<B: Source>(src: &mut B, cand: u64, file_len: u64) -> Result<bool> {
+    let Some(hdr) = read_header(src, cand, file_len).ok().flatten() else {
+        return Ok(false);
+    };
+    if hdr.id != ID_CLUSTER {
+        return Ok(false);
+    }
+    let body = cand + hdr.len as u64;
+    if let Some(size) = hdr.size {
+        if body.saturating_add(size) > file_len {
+            return Ok(false);
+        }
+    }
+    match read_header(src, body, file_len).ok().flatten() {
+        Some(child) => Ok(CLUSTER_CHILD_IDS.contains(&child.id)),
+        None => Ok(false),
+    }
 }
 
 /// Trims trailing NUL bytes and decodes UTF-8 leniently.
@@ -430,6 +497,11 @@ struct Scanner {
     seen_segment: bool,
     stack: Vec<Open>,
     warnings: Vec<String>,
+    /// (offset, length) of regions skipped by resyncing to a later Cluster.
+    skipped: Vec<(u64, u64)>,
+    /// (offset, length) of unreadable data at the end that was ignored.
+    ignored_tail: Option<(u64, u64)>,
+    resyncs: usize,
 }
 
 impl Scanner {
@@ -446,6 +518,9 @@ impl Scanner {
             seen_segment: false,
             stack: Vec::new(),
             warnings: Vec::new(),
+            skipped: Vec::new(),
+            ignored_tail: None,
+            resyncs: 0,
         }
     }
 
@@ -466,9 +541,33 @@ impl Scanner {
             }
             let limit = self.stack.last().map_or(len, |t| t.limit);
             let parent = self.stack.last().map_or(0, |t| t.id);
-            let Some(hdr) = read_header(src, pos, limit)? else {
-                truncated = true;
-                break;
+            let hdr = match read_header(src, pos, limit) {
+                Ok(Some(h)) => h,
+                // The parent's declared extent ends inside this header although the file
+                // continues: the parent's size field is damaged, not the file cut short.
+                Ok(None) if limit < len && pos < len && self.can_resync() => {
+                    match self.recover(src, pos, len, "element cut off by its parent")? {
+                        Some(next) => {
+                            pos = next;
+                            continue;
+                        }
+                        None => break,
+                    }
+                }
+                Ok(None) => {
+                    truncated = true;
+                    break;
+                }
+                Err(Error::InvalidMkv(msg)) if self.can_resync() => {
+                    match self.recover(src, pos, len, &msg)? {
+                        Some(next) => {
+                            pos = next;
+                            continue;
+                        }
+                        None => break,
+                    }
+                }
+                Err(e) => return Err(e),
             };
             if self.ends_open_unknown(hdr.id) {
                 self.close_top()?;
@@ -487,7 +586,17 @@ impl Scanner {
                     pos = data;
                     continue;
                 }
-                return Err(invalid(format!("element 0x{:X} has unknown size", hdr.id)));
+                let msg = format!("element 0x{:X} has unknown size", hdr.id);
+                if self.can_resync() {
+                    match self.recover(src, pos, len, &msg)? {
+                        Some(next) => {
+                            pos = next;
+                            continue;
+                        }
+                        None => break,
+                    }
+                }
+                return Err(invalid(msg));
             };
             let declared_end = data
                 .checked_add(size)
@@ -506,11 +615,107 @@ impl Scanner {
                 truncated = true;
                 break;
             }
-            self.leaf(src, parent, hdr.id, data, size)?;
+            match self.leaf(src, parent, hdr.id, data, size) {
+                Ok(()) => {}
+                // A malformed block/leaf inside cluster data: drop the damaged region and
+                // continue at the next cluster instead of failing the whole file.
+                Err(Error::InvalidMkv(msg)) if self.can_resync() => {
+                    match self.recover(src, pos, len, &msg)? {
+                        Some(next) => {
+                            pos = next;
+                            continue;
+                        }
+                        None => break,
+                    }
+                }
+                Err(e) => return Err(e),
+            }
             pos = declared_end;
         }
         self.finalize_draft()?;
+        self.summarize_damage();
         Ok(truncated)
+    }
+
+    /// True when damaged data may be skipped: a Segment has started and every open container
+    /// is the Segment, a Cluster or a BlockGroup (never inside Info/Tracks metadata).
+    fn can_resync(&self) -> bool {
+        self.seen_segment
+            && self
+                .stack
+                .iter()
+                .all(|o| matches!(o.id, ID_SEGMENT | ID_CLUSTER | ID_BLOCK_GROUP))
+    }
+
+    /// Handles unreadable data at `bad_pos`. `Ok(Some(p))` = continue scanning at `p` (the next
+    /// valid Cluster); `Ok(None)` = nothing readable follows, stop and ignore the rest; `Err` =
+    /// no media was read yet, so the file is reported as unreadable with actionable details.
+    fn recover<B: Source>(
+        &mut self,
+        src: &mut B,
+        bad_pos: u64,
+        len: u64,
+        cause: &str,
+    ) -> Result<Option<u64>> {
+        self.resyncs += 1;
+        if self.resyncs > MAX_RESYNCS {
+            return Err(invalid(format!(
+                "too many damaged regions (last: {cause} at offset {bad_pos})"
+            )));
+        }
+        let search_end = len.min(bad_pos.saturating_add(RESYNC_WINDOW));
+        match find_cluster(src, bad_pos.saturating_add(1), search_end, len)? {
+            Some(next) => {
+                // Discard the damaged containers (a partial BlockGroup is dropped) but keep
+                // the Segment so later clusters are parsed as usual.
+                let keep = self
+                    .stack
+                    .iter()
+                    .position(|o| o.id == ID_SEGMENT)
+                    .map_or(0, |i| i + 1);
+                self.stack.truncate(keep);
+                self.skipped.push((bad_pos, next - bad_pos));
+                Ok(Some(next))
+            }
+            None if self.total_samples > 0 => {
+                self.ignored_tail = Some((bad_pos, len - bad_pos));
+                Ok(None)
+            }
+            None => {
+                let mut head = [0u8; 8];
+                let n = (len.saturating_sub(bad_pos)).min(8) as usize;
+                if let Some(dst) = head.get_mut(..n) {
+                    src.read_at(bad_pos, dst)?;
+                }
+                let hex = head
+                    .get(..n)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|b| format!("{b:02X}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let parent = self.stack.last().map_or(0, |t| t.id);
+                Err(invalid(format!(
+                    "{cause} at offset {bad_pos} (inside element 0x{parent:X}); next bytes: {hex}; no media data could be found"
+                )))
+            }
+        }
+    }
+
+    fn summarize_damage(&mut self) {
+        if !self.skipped.is_empty() {
+            let total: u64 = self.skipped.iter().map(|s| s.1).sum();
+            let first = self.skipped[0].0;
+            self.warnings.push(format!(
+                "skipped {total} bytes of unreadable data in {} place(s), first at offset {first}",
+                self.skipped.len()
+            ));
+        }
+        if let Some((at, n)) = self.ignored_tail {
+            self.warnings.push(format!(
+                "ignored {n} bytes of unreadable data at the end of the file (from offset {at})"
+            ));
+        }
     }
 
     fn into_mkv(self, truncated: bool) -> Result<Mkv> {
