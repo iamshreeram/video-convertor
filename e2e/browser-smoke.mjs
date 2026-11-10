@@ -1628,6 +1628,89 @@ async function testT21(env) {
 
 // ---------- test table ----------
 
+// ---------- T22/T23: Vorbis re-encode and damaged/padded files ----------
+
+async function meanVolumeDb(file) {
+  let stderr = "";
+  try {
+    ({ stderr } = await execFileAsync(
+      FFMPEG,
+      ["-hide_banner", "-i", file, "-vn", "-af", "volumedetect", "-f", "null", "-"],
+      { maxBuffer: 64 << 20 },
+    ));
+  } catch (err) {
+    stderr = err.stderr || "";
+  }
+  const m = /mean_volume:\s*(-?[\d.]+) dB/.exec(stderr);
+  return m ? Number(m[1]) : null;
+}
+
+async function testT22(env) {
+  const src = fixture("h264_vorbis");
+  if (!fs.existsSync(src)) {
+    skip("no h264_vorbis.mkv fixture (needs ffmpeg with libvorbis)");
+  }
+  const page = await openApp(env, { url: shared.root });
+  const { pick, state } = await convertOne(page, src);
+  await expectDone(page, pick, state);
+  const warnings = await cardText(page, pick, testid("job-warnings"));
+  assert(/re-encoded to (AAC|Opus)/.test(warnings), `no re-encode notice in warnings: "${warnings}"`);
+  assert(!/Skipped track/.test(warnings), `the Vorbis track must not be reported as skipped: "${warnings}"`);
+  const chips = (await cardOf(page, pick).locator(testid("job-track")).allTextContents()).map((t) => t.trim());
+  assert(chips.some((t) => /AAC|Opus/.test(t)), `no re-encoded audio chip: ${JSON.stringify(chips)}`);
+
+  const dest = path.join(WORK, "t22-h264_vorbis.mp4");
+  await downloadFrom(page, pick, dest);
+  const out = await probeFull(dest);
+  const video = out.streams.find((x) => x.type === "video");
+  const audio = out.streams.find((x) => x.type === "audio");
+  assert(video && video.codec === "h264", `video stream: ${JSON.stringify(out.streams)}`);
+  assert(audio && ["aac", "opus"].includes(audio.codec), `audio stream: ${JSON.stringify(out.streams)}`);
+  assert(audio.channels === 2, `channels ${audio.channels}`);
+  const dec = await ffmpegDecode(dest, null);
+  assert(dec.code === 0 && dec.lines.length === 0, `output does not decode cleanly: ${dec.lines.slice(0, 2).join(" / ")}`);
+  assert(Math.abs(out.duration - 3) < 0.25, `duration ${out.duration}`);
+  // A/V sync: the re-encoded audio must start and end together with the video (AAC priming
+  // may shift it slightly; more than 100 ms would be audible lip-sync drift).
+  const { stdout: timing } = await execFileAsync(FFPROBE, [
+    "-v", "error", "-show_entries", "stream=codec_type,start_time,duration", "-of", "json", dest,
+  ]);
+  const t = Object.fromEntries(JSON.parse(timing).streams.map((x) => [x.codec_type, x]));
+  const startGap = Math.abs(Number(t.audio.start_time) - Number(t.video.start_time));
+  const endGap = Math.abs(
+    Number(t.audio.start_time) + Number(t.audio.duration) - (Number(t.video.start_time) + Number(t.video.duration)),
+  );
+  assert(startGap < 0.1, `audio starts ${startGap.toFixed(3)} s away from video`);
+  assert(endGap < 0.2, `audio ends ${endGap.toFixed(3)} s away from video`);
+  const vol = await meanVolumeDb(dest);
+  const srcVol = await meanVolumeDb(src);
+  assert(vol !== null && vol > -60, `output audio is silent (mean ${vol} dB)`);
+  assert(srcVol !== null && Math.abs(vol - srcVol) < 3, `loudness changed: ${vol} dB vs source ${srcVol} dB`);
+  return `${audio.codec} ${audio.channels}ch, duration ${out.duration.toFixed(2)} s, A/V start gap ${startGap.toFixed(3)} s, end gap ${endGap.toFixed(3)} s, mean ${vol} dB vs ${srcVol} dB`;
+}
+
+async function testT23(env) {
+  // A valid file followed by zeros (preallocated / partially downloaded recording) must still convert
+  // and give exactly the same MP4 as the clean file.
+  const clean = fixture("h264_aac");
+  const padded = path.join(WORK, "t23-padded.mkv");
+  fs.copyFileSync(clean, padded);
+  fs.appendFileSync(padded, Buffer.alloc(20 * 1024 * 1024));
+  const page = await openApp(env, { url: shared.root });
+  const a = await convertOne(page, clean);
+  await expectDone(page, a.pick, a.state);
+  const b = await convertOne(page, padded);
+  await expectDone(page, b.pick, b.state);
+  const warnings = await cardText(page, b.pick, testid("job-warnings"));
+  assert(/unreadable/.test(warnings), `no notice about the ignored tail: "${warnings}"`);
+  const shaClean = await downloadSha(page, a.pick, path.join(WORK, "t23-clean.mp4"));
+  const shaPadded = await downloadSha(page, b.pick, path.join(WORK, "t23-padded.mp4"));
+  assert(shaClean === shaPadded, "padded file produced a different MP4");
+  const { problems } = await verifyOutput(clean, path.join(WORK, "t23-padded.mp4"), null);
+  assert(problems.length === 0, problems.join("; "));
+  return "20 MB zero tail ignored with notice; output identical to the clean file";
+}
+
 const TESTS = [
   { id: "T1", title: "OPFS convert h264_aac at /video-convertor/ (chips, download, ffprobe, preview)", timeoutMs: 300000, run: testT1 },
   { id: "T2", title: "in-memory sink (?nofs=1) gives the same bytes, no OPFS files", timeoutMs: 300000, run: testT2 },
@@ -1651,6 +1734,8 @@ const TESTS = [
   { id: "T19b", title: "worker bootstrap and ready-timeout failures fail closed ('secure worker')", timeoutMs: 300000, run: testT19b },
   { id: "T20", title: "aggregate memory budget (?nofs=1&membudget=250000)", timeoutMs: 300000, run: testT20 },
   { id: "T21", title: "keyboard a11y: Tab order, focus after removal, accessible names, progress semantics", timeoutMs: 300000, run: testT21 },
+  { id: "T22", title: "Vorbis audio is re-encoded to AAC/Opus with WebCodecs (valid MP4, same duration and loudness)", timeoutMs: 300000, run: testT22 },
+  { id: "T23", title: "zero-padded MKV converts, with a notice, to the identical MP4", timeoutMs: 300000, run: testT23 },
 ];
 
 // ---------- main ----------

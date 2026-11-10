@@ -5,7 +5,19 @@
 // In:  {type:"process", file, sessionId, sweep, runId, inMemory, memoryBudgetBytes}
 //      {type:"cleanup", sessionId, runIds:[number]}
 // Out: stage | analysis | progress | info | done | error | cleaned
-import init, { convert_mkv_to_mp4, probe_mkv, version } from "../pkg/mkv2mp4.js";
+import init, {
+  convert_mkv_to_mp4_ex,
+  export_audio_track,
+  probe_mkv,
+  probe_mkv_ex,
+  version,
+} from "../pkg/mkv2mp4.js";
+import {
+  MAX_BUFFER_BYTES,
+  buildReplacement,
+  canReencodeVorbis,
+  transcodeVorbis,
+} from "../js/core/audio-transcode.js";
 
 postMessage({ type: "ready" });
 
@@ -58,8 +70,23 @@ async function runProcess(msg) {
 
     postMessage({ type: "stage", stage: "analyzing" });
     const read = makeReader(file);
-    const report = JSON.parse(probe_mkv(file.size, read));
+    let report = JSON.parse(probe_mkv(file.size, read));
     postMessage({ type: "analysis", report });
+
+    // MP4 cannot hold Vorbis: decode it and re-encode to AAC/Opus with WebCodecs when possible.
+    let replacement = null;
+    let audioNote = null;
+    const reencodable = Array.isArray(report.reencodable) ? report.reencodable : [];
+    if (reencodable.length > 0) {
+      const outcome = await reencodeAudio(file, read, reencodable[0]);
+      audioNote = outcome.note;
+      if (outcome.replacement) {
+        replacement = outcome.replacement;
+        report = outcome.report;
+      }
+      report.warnings = [...(report.warnings ?? []), audioNote];
+      postMessage({ type: "analysis", report });
+    }
 
     const outputName = makeOutputName(file.name);
     const budget = normaliseBudget(msg.memoryBudgetBytes);
@@ -96,7 +123,7 @@ async function runProcess(msg) {
         }
         position += written;
       };
-      summaryText = convert_mkv_to_mp4(file.size, 0, read, writeChunk, onProgress);
+      summaryText = convert_mkv_to_mp4_ex(file.size, 0, read, writeChunk, onProgress, replacement);
       postMessage({ type: "progress", fraction: 1 });
       postMessage({ type: "stage", stage: "finalizing" });
       opfs.access.flush();
@@ -105,7 +132,7 @@ async function runProcess(msg) {
       result = await opfs.handle.getFile();
     } else {
       const chunks = [];
-      summaryText = convert_mkv_to_mp4(
+      summaryText = convert_mkv_to_mp4_ex(
         file.size,
         budget,
         read,
@@ -113,6 +140,7 @@ async function runProcess(msg) {
           chunks.push(chunk);
         },
         onProgress,
+        replacement,
       );
       postMessage({ type: "progress", fraction: 1 });
       postMessage({ type: "stage", stage: "finalizing" });
@@ -120,6 +148,9 @@ async function runProcess(msg) {
     }
 
     const summary = JSON.parse(summaryText);
+    if (audioNote) {
+      summary.warnings = [...(summary.warnings ?? []), audioNote];
+    }
     postMessage({ type: "done", file: result, summary, outputName, inMemory: !state.opfs });
     self.close();
   } catch (err) {
@@ -127,6 +158,60 @@ async function runProcess(msg) {
     const message = errorText(err);
     postMessage({ type: "error", message, details: message });
     self.close();
+  }
+}
+
+/**
+ * Re-encodes one Vorbis track. Never throws: on any problem the track simply stays skipped and
+ * `note` says why (it is shown to the user as a warning).
+ * @param {Blob} file
+ * @param {(offset: number, length: number) => Uint8Array} read
+ * @param {{number: number, codecId: string}} track
+ * @returns {Promise<{note: string, replacement?: object, report?: object}>}
+ */
+async function reencodeAudio(file, read, track) {
+  const skipped = (why) => ({
+    note: `track ${track.number} (${track.codecId}) skipped: ${why}`,
+  });
+  const deps = {
+    AudioDecoder: self.AudioDecoder,
+    AudioEncoder: self.AudioEncoder,
+    EncodedAudioChunk: self.EncodedAudioChunk,
+  };
+  if (!deps.AudioDecoder || !deps.AudioEncoder || !deps.EncodedAudioChunk) {
+    return skipped("this browser cannot re-encode Vorbis audio (no WebCodecs audio support)");
+  }
+  try {
+    postMessage({ type: "stage", stage: "reencoding-audio" });
+    const packets = [];
+    let bytes = 0;
+    const info = export_audio_track(file.size, read, track.number, (ptsNs, data) => {
+      bytes += data.length;
+      if (bytes > MAX_BUFFER_BYTES) {
+        throw new Error("the audio track is too large to re-encode in the browser");
+      }
+      packets.push({ ptsNs, data });
+    });
+    const format = {
+      codecPrivate: info.codecPrivate,
+      sampleRate: info.sampleRate,
+      channels: info.channels,
+    };
+    const encoder = await canReencodeVorbis(deps, format);
+    if (!encoder) {
+      return skipped("this browser cannot decode Vorbis or encode AAC/Opus audio");
+    }
+    const result = await transcodeVorbis({ info: format, packets, encoder, deps });
+    const replacement = buildReplacement(track.number, result);
+    const report = JSON.parse(probe_mkv_ex(file.size, read, replacement));
+    const label = encoder.id === "aac" ? "AAC" : "Opus";
+    return {
+      note: `Audio track ${track.number} (Vorbis) was re-encoded to ${label} because MP4 cannot hold Vorbis (this step is lossy).`,
+      replacement,
+      report,
+    };
+  } catch (err) {
+    return skipped(`re-encoding failed (${errorText(err)})`);
   }
 }
 

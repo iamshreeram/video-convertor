@@ -348,6 +348,11 @@ validate_one() {
       validate_truncated "$name" "$file" "$dir" "$out"
       return
       ;;
+    *vorbis*)
+      # MP4 cannot hold Vorbis; the page re-encodes it with WebCodecs, which node lacks.
+      report SKIP "$name" all "Vorbis is re-encoded in the browser (e2e T22)"
+      return
+      ;;
   esac
 
   node "$smoke" "$file" "$out" >"$dir/smoke.json" 2>"$dir/smoke.err"

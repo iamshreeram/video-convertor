@@ -85,8 +85,22 @@ pub(crate) fn probe_to_json(report: &ProbeReport) -> String {
         .map(|w| json_string(w))
         .collect::<Vec<_>>()
         .join(",");
+    let reencodable = report
+        .reencodable
+        .iter()
+        .map(|r| {
+            format!(
+                "{{\"number\":{},\"codecId\":{},\"channels\":{},\"sampleRate\":{}}}",
+                r.number,
+                json_string(&r.codec_id),
+                r.channels,
+                r.sample_rate
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
     format!(
-        "{{\"tracks\":[{tracks}],\"durationMs\":{},\"outputSize\":{},\"warnings\":[{warnings}]}}",
+        "{{\"tracks\":[{tracks}],\"durationMs\":{},\"outputSize\":{},\"reencodable\":[{reencodable}],\"warnings\":[{warnings}]}}",
         report.duration_ms, report.output_size
     )
 }
@@ -193,6 +207,12 @@ mod tests {
             duration_ms: 1000,
             output_size: 12345,
             warnings: vec!["w\"1".to_string()],
+            reencodable: vec![crate::convert::ReencodableTrack {
+                number: 3,
+                codec_id: "A_VORBIS".to_string(),
+                channels: 2,
+                sample_rate: 44100,
+            }],
         }
     }
 
@@ -200,7 +220,7 @@ mod tests {
     fn probe_json_audio_and_video_example() {
         assert_eq!(
             probe_to_json(&sample_probe()),
-            r#"{"tracks":[{"kind":"video","codec":"h264","width":320,"height":240,"channels":0,"sampleRate":0,"language":"und","sampleCount":24},{"kind":"audio","codec":"aac","width":0,"height":0,"channels":2,"sampleRate":48000,"language":"eng","sampleCount":47}],"durationMs":1000,"outputSize":12345,"warnings":["w\"1"]}"#
+            r#"{"tracks":[{"kind":"video","codec":"h264","width":320,"height":240,"channels":0,"sampleRate":0,"language":"und","sampleCount":24},{"kind":"audio","codec":"aac","width":0,"height":0,"channels":2,"sampleRate":48000,"language":"eng","sampleCount":47}],"durationMs":1000,"outputSize":12345,"reencodable":[{"number":3,"codecId":"A_VORBIS","channels":2,"sampleRate":44100}],"warnings":["w\"1"]}"#
         );
     }
 
@@ -211,10 +231,12 @@ mod tests {
             duration_ms: 0,
             output_size: 0,
             warnings: Vec::new(),
+            reencodable: Vec::new(),
         };
+        // Schema extended (additive) by the re-encode feature: `reencodable` sits before `warnings`.
         assert_eq!(
             probe_to_json(&report),
-            r#"{"tracks":[],"durationMs":0,"outputSize":0,"warnings":[]}"#
+            r#"{"tracks":[],"durationMs":0,"outputSize":0,"reencodable":[],"warnings":[]}"#
         );
     }
 

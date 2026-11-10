@@ -98,6 +98,14 @@ Web layers (`web/js/`): `core/` (pure helpers + browser services: `format`, `err
 - **GitHub Pages cannot set response headers** (no COOP/COEP), so `SharedArrayBuffer`/threaded
   wasm is unavailable unless a service-worker shim is used, which conflicts with the privacy
   model (see the ffmpeg.wasm issue).
+- **Damaged/padded MKVs**: the scanner (`src/mkv.rs`, `recover`/`find_cluster`) resyncs to the next
+  valid Cluster instead of failing on an invalid element ID (zero-filled tails from preallocated or
+  partial downloads were the cause of "invalid EBML element ID"). Regression tests:
+  `tests/regress_ebml_id.rs`. Hard failures (no media at all) must keep the offset + hex bytes in the message.
+- **Vorbis cannot live in MP4.** The worker re-encodes it with WebCodecs (`web/js/core/audio-transcode.js`);
+  the encoded packets are appended to the file as an "extra" source and swapped in as a
+  `TrackReplacement` (`convert_with_replacements`), so the MP4 writer is unchanged. Node has no
+  WebCodecs, so `scripts/validate.sh` skips `*vorbis*` fixtures (covered by e2e T22).
 - Theme colours flip without CSS transitions on purpose (transitions caused a mixed light/dark
   frame). Tokens: single source in `web/css/tokens.css`, applied before first paint by
   `web/js/theme-init.js`.

@@ -136,6 +136,13 @@ pub fn build_plan<S: Source>(mkv: &Mkv, src: &mut S) -> Result<Plan> {
                 TrackKind::Other => Some("unsupported track type".to_string()),
             },
         };
+        let reason = reason.map(|r| {
+            if t.codec_id == "A_VORBIS" && r == "unsupported codec" {
+                "Vorbis cannot be stored in MP4 without re-encoding (to AAC or Opus)".to_string()
+            } else {
+                r
+            }
+        });
         if let Some(r) = &reason {
             warnings.push(format!(
                 "track {} ({}) skipped: {}",

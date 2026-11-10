@@ -1,10 +1,10 @@
 //! Top-level conversion pipeline: scan -> plan -> header check -> write.
 
 use crate::error::{Error, Result};
-use crate::mkv::{scan, Mkv, TrackKind, READ_MAX_WINDOW, READ_MIN_WINDOW};
+use crate::mkv::{scan, AudioInfo, Mkv, SampleRef, TrackKind, READ_MAX_WINDOW, READ_MIN_WINDOW};
 use crate::mp4::{build_header, write_mp4};
 use crate::plan::{build_plan, Plan};
-use crate::source::{BufferedSource, Sink, Source};
+use crate::source::{BufferedSource, ConcatSource, EmptySource, Sink, Source};
 
 /// Read-ahead window wrapped around the input source.
 const READ_WINDOW_BYTES: usize = 4 << 20;
@@ -31,11 +31,25 @@ pub struct ConvertReport {
 
 /// Converts `src` (MKV) to MP4 written into `sink`. `progress` is monotone in [0,1], ends at 1.0 on success.
 pub fn convert<S: Source, K: Sink>(
-    mut src: S,
+    src: S,
     sink: &mut K,
     opts: &ConvertOptions,
     progress: &mut dyn FnMut(f64),
 ) -> Result<ConvertReport> {
+    convert_with_replacements(src, EmptySource, &[], sink, opts, progress)
+}
+
+/// Like [`convert`], but audio tracks listed in `replacements` use the packets stored in `extra`
+/// (for example Vorbis re-encoded to AAC by the browser) instead of the packets in the file.
+pub fn convert_with_replacements<S: Source, E: Source, K: Sink>(
+    src: S,
+    extra: E,
+    replacements: &[TrackReplacement],
+    sink: &mut K,
+    opts: &ConvertOptions,
+    progress: &mut dyn FnMut(f64),
+) -> Result<ConvertReport> {
+    let mut combined = ConcatSource::new(src, extra);
     let mut reporter = Progress {
         last: f64::NEG_INFINITY,
         inner: progress,
@@ -46,7 +60,8 @@ pub fn convert<S: Source, K: Sink>(
         mkv,
         plan,
         total_size,
-    } = analyze(&mut src, &mut |pos, len| {
+        ..
+    } = analyze(&mut combined, replacements, &mut |pos, len| {
         reporter.report(scan_fraction(pos, len))
     })?;
 
@@ -61,7 +76,7 @@ pub fn convert<S: Source, K: Sink>(
     }
 
     // Write phase: slice reads are at most 1 MiB; the 4 MiB window absorbs the A/V interleave.
-    let mut write_src = BufferedSource::new(&mut src, READ_WINDOW_BYTES);
+    let mut write_src = BufferedSource::new(&mut combined, READ_WINDOW_BYTES);
     let output_size = write_mp4(&plan, &mut write_src, sink, &mut |done, total| {
         reporter.report(write_fraction(done, total))
     })?;
@@ -70,19 +85,223 @@ pub fn convert<S: Source, K: Sink>(
     build_report(mkv, &plan, output_size)
 }
 
+/// One encoded packet of a replacement track; its bytes are stored back to back in `extra`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReplacementSample {
+    pub size: u32,
+    pub pts_ns: i64,
+    pub duration_ns: u64,
+}
+
+/// An audio track whose packets were re-encoded outside the engine (all samples are key frames).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrackReplacement {
+    /// Matroska track number being replaced.
+    pub track_number: u64,
+    /// New Matroska codec id, e.g. "A_AAC" or "A_OPUS".
+    pub codec_id: String,
+    /// AudioSpecificConfig (AAC) or OpusHead (Opus).
+    pub codec_private: Vec<u8>,
+    pub sample_rate: f64,
+    pub channels: u32,
+    pub codec_delay_ns: Option<u64>,
+    pub samples: Vec<ReplacementSample>,
+}
+
+/// An audio track the engine cannot copy but the browser may be able to re-encode.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReencodableTrack {
+    pub number: u64,
+    pub codec_id: String,
+    pub channels: u32,
+    pub sample_rate: u32,
+}
+
+/// Codec details of an exported track.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrackExport {
+    pub codec_id: String,
+    pub codec_private: Vec<u8>,
+    pub sample_rate: f64,
+    pub channels: u32,
+}
+
+/// Streams every packet of `track_number` (file order) to `sink(pts_ns, bytes)`, reading the file
+/// with large sequential windows. Used to hand Vorbis packets to the browser's decoder.
+pub fn export_track_packets<S: Source>(
+    mut src: S,
+    track_number: u64,
+    sink: &mut dyn FnMut(i64, &[u8]) -> Result<()>,
+) -> Result<TrackExport> {
+    let mkv = scan(&mut src, &mut |_, _| {})?;
+    let track = mkv
+        .tracks
+        .iter()
+        .find(|t| t.number == track_number)
+        .ok_or_else(|| Error::Unsupported(format!("no track {track_number}")))?;
+    if track.laced || track.content_encoded {
+        return Err(Error::Unsupported(
+            "track uses lacing or content encoding".into(),
+        ));
+    }
+    let audio = track
+        .audio
+        .as_ref()
+        .ok_or_else(|| Error::Unsupported(format!("track {track_number} is not audio")))?;
+    let export = TrackExport {
+        codec_id: track.codec_id.clone(),
+        codec_private: track.codec_private.clone(),
+        sample_rate: audio
+            .output_sampling_frequency
+            .unwrap_or(audio.sampling_frequency),
+        channels: audio.channels,
+    };
+    let mut window = BufferedSource::new_adaptive(&mut src, READ_MIN_WINDOW, READ_MAX_WINDOW);
+    let mut buf: Vec<u8> = Vec::new();
+    for sample in &track.samples {
+        let n = sample.size as usize;
+        buf.clear();
+        buf.try_reserve(n)
+            .map_err(|_| Error::TooLarge("packet allocation failed".into()))?;
+        buf.resize(n, 0);
+        window.read_at(sample.offset, &mut buf)?;
+        sink(sample.pts_ns, &buf)?;
+    }
+    Ok(export)
+}
+
+/// Swaps the packets of the listed audio tracks for the replacement packets, which are addressed
+/// in the combined source right after the original file (`file_len`).
+fn apply_replacements(
+    mkv: &mut Mkv,
+    file_len: u64,
+    extra_len: u64,
+    replacements: &[TrackReplacement],
+) -> Result<()> {
+    let mut done: Vec<u64> = Vec::new();
+    let mut cursor = 0u64;
+    for r in replacements {
+        if done.contains(&r.track_number) {
+            return Err(Error::Unsupported(format!(
+                "track {} replaced twice",
+                r.track_number
+            )));
+        }
+        done.push(r.track_number);
+        if r.samples.is_empty() {
+            return Err(Error::Unsupported("replacement has no samples".into()));
+        }
+        if !r.sample_rate.is_finite() || r.sample_rate <= 0.0 || r.channels == 0 {
+            return Err(Error::Unsupported(
+                "replacement audio format is invalid".into(),
+            ));
+        }
+        let track = mkv
+            .tracks
+            .iter_mut()
+            .find(|t| t.number == r.track_number)
+            .ok_or_else(|| Error::Unsupported(format!("no track {}", r.track_number)))?;
+        if track.kind != TrackKind::Audio {
+            return Err(Error::Unsupported(format!(
+                "track {} is not audio",
+                r.track_number
+            )));
+        }
+        let mut samples = Vec::new();
+        samples
+            .try_reserve_exact(r.samples.len())
+            .map_err(|_| Error::TooLarge("replacement sample table".into()))?;
+        for s in &r.samples {
+            if s.size == 0 {
+                return Err(Error::Unsupported("replacement has an empty packet".into()));
+            }
+            samples.push(SampleRef {
+                offset: file_len + cursor,
+                size: s.size,
+                pts_ns: s.pts_ns,
+                keyframe: true,
+                duration_ns: Some(s.duration_ns),
+                discard_padding_ns: None,
+            });
+            cursor = cursor
+                .checked_add(u64::from(s.size))
+                .ok_or_else(|| Error::TooLarge("replacement data size overflow".into()))?;
+            if cursor > extra_len {
+                return Err(Error::Io(
+                    "replacement data is shorter than its sample table".into(),
+                ));
+            }
+        }
+        track.codec_id = r.codec_id.clone();
+        track.codec_private = r.codec_private.clone();
+        track.audio = Some(AudioInfo {
+            sampling_frequency: r.sample_rate,
+            output_sampling_frequency: None,
+            channels: r.channels,
+            bit_depth: None,
+        });
+        track.codec_delay_ns = r.codec_delay_ns;
+        track.seek_pre_roll_ns = None;
+        track.default_duration_ns = None;
+        track.laced = false;
+        track.content_encoded = false;
+        track.samples = samples;
+    }
+    Ok(())
+}
+
+/// Audio tracks of kind Vorbis that a browser decoder + encoder could turn into AAC/Opus.
+fn reencodable_tracks(mkv: &Mkv) -> Vec<ReencodableTrack> {
+    mkv.tracks
+        .iter()
+        .filter(|t| {
+            t.kind == TrackKind::Audio
+                && t.codec_id == "A_VORBIS"
+                && !t.laced
+                && !t.content_encoded
+                && !t.samples.is_empty()
+        })
+        .filter_map(|t| {
+            let a = t.audio.as_ref()?;
+            let rate = a.output_sampling_frequency.unwrap_or(a.sampling_frequency);
+            Some(ReencodableTrack {
+                number: t.number,
+                codec_id: t.codec_id.clone(),
+                channels: a.channels,
+                sample_rate: if rate.is_finite() && rate > 0.0 && rate < 4e9 {
+                    rate.round() as u32
+                } else {
+                    0
+                },
+            })
+        })
+        .collect()
+}
+
 /// Result of the scan and plan phases; nothing has been written yet.
 struct Analysis {
     mkv: Mkv,
     plan: Plan,
     /// Exact size of the MP4 that `write_mp4` will produce.
     total_size: u64,
+    /// Tracks still skipped because they need re-encoding.
+    reencodable: Vec<ReencodableTrack>,
 }
 
 /// Scan and plan phases, shared by `convert` and `probe` so the two cannot drift.
-/// Reads only; writes nothing.
-fn analyze<S: Source>(src: &mut S, scan_progress: &mut dyn FnMut(u64, u64)) -> Result<Analysis> {
+/// Reads only; writes nothing. The scan sees only the original file; the plan sees the file
+/// followed by the replacement packets.
+fn analyze<A: Source, B: Source>(
+    src: &mut ConcatSource<A, B>,
+    replacements: &[TrackReplacement],
+    scan_progress: &mut dyn FnMut(u64, u64),
+) -> Result<Analysis> {
     // scan wraps the source in its own adaptive window; no extra layer here.
-    let mkv = scan(&mut *src, scan_progress)?;
+    let mut mkv = scan(src.primary_mut(), scan_progress)?;
+    let file_len = src.primary_len();
+    let extra_len = src.len() - file_len;
+    apply_replacements(&mut mkv, file_len, extra_len, replacements)?;
+    let reencodable = reencodable_tracks(&mkv);
     // Plan phase: only tiny header reads, so a small adaptive window suffices.
     let plan = {
         let mut plan_src =
@@ -94,6 +313,7 @@ fn analyze<S: Source>(src: &mut S, scan_progress: &mut dyn FnMut(u64, u64)) -> R
         mkv,
         plan,
         total_size,
+        reencodable,
     })
 }
 
@@ -124,16 +344,29 @@ pub struct ProbeReport {
     pub output_size: u64,
     /// Scan warnings followed by plan warnings, as in `ConvertReport`.
     pub warnings: Vec<String>,
+    /// Skipped audio tracks that could be re-encoded by the caller (see `TrackReplacement`).
+    pub reencodable: Vec<ReencodableTrack>,
 }
 
 /// Scans and plans `src` exactly as `convert` does, but writes nothing.
 /// Fails with the same errors `convert` would fail with for the same input.
-pub fn probe<S: Source>(mut src: S) -> Result<ProbeReport> {
+pub fn probe<S: Source>(src: S) -> Result<ProbeReport> {
+    probe_with_replacements(src, EmptySource, &[])
+}
+
+/// [`probe`] with replacement audio packets (see [`convert_with_replacements`]).
+pub fn probe_with_replacements<S: Source, E: Source>(
+    src: S,
+    extra: E,
+    replacements: &[TrackReplacement],
+) -> Result<ProbeReport> {
+    let mut combined = ConcatSource::new(src, extra);
     let Analysis {
         mkv,
         plan,
         total_size,
-    } = analyze(&mut src, &mut |_, _| {})?;
+        reencodable,
+    } = analyze(&mut combined, replacements, &mut |_, _| {})?;
     let tracks = plan
         .tracks
         .iter()
@@ -155,6 +388,7 @@ pub fn probe<S: Source>(mut src: S) -> Result<ProbeReport> {
         duration_ms: plan.duration,
         output_size: total_size,
         warnings,
+        reencodable,
     })
 }
 

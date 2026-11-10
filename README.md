@@ -39,6 +39,10 @@ Site: <https://iamshreeram.github.io/video-convertor/>
 
 A file with no supported track fails with an error that lists what was found.
 
+**Vorbis audio is re-encoded.** MP4 cannot carry Vorbis, which many older MKV/WebM files use. When the browser supports it (WebCodecs: a Vorbis decoder plus an AAC or Opus encoder, e.g. current Chrome and Edge), the Vorbis track is decoded and re-encoded to **AAC** (or **Opus** if AAC is unavailable) at about 64 kbps per channel, entirely on the device. This step is lossy, so the card says so, and the video is still copied untouched. If the browser cannot do it, the track is skipped with a warning as before.
+
+**Damaged or padded files are tolerated.** If part of an MKV is unreadable (a zero-filled tail left by a preallocated or unfinished download, or a damaged region in the middle), the converter resynchronises at the next valid cluster, keeps everything readable and reports what it skipped. It fails only when no media could be read at all, and then the error names the byte offset and the bytes found there.
+
 ## Performance
 
 A remux copies the existing compressed bytes and rewrites only the container metadata. There is no decoding and no per-pixel or per-sample computation, so throughput is bounded by how fast the browser can read the input and write the output, not by the CPU or GPU.
@@ -55,7 +59,7 @@ Measured on a laptop with headless Chrome writing to OPFS: a file of about 390 M
 
 ## Limitations
 
-- **No transcoding.** Tracks that MP4 cannot carry in this form (VP8/VP9 video, E-AC-3, DTS, TrueHD, PCM audio) are dropped. If you need them, transcode with ffmpeg first, for example `ffmpeg -i in.mkv -c:v libx264 -c:a aac out.mp4`.
+- **No video transcoding.** Tracks that MP4 cannot carry in this form (VP8/VP9 video, E-AC-3, DTS, TrueHD, PCM audio) are dropped. The only re-encoding is the Vorbis-to-AAC/Opus audio step described above (about 512 MB of compressed audio at most; larger tracks are skipped). If you need them, transcode with ffmpeg first, for example `ffmpeg -i in.mkv -c:v libx264 -c:a aac out.mp4`.
 - **Only the first video track** is converted. Additional video tracks are skipped.
 - **Subtitles, attachments and chapters are dropped.**
 - **Playback depends on the browser.** The MP4 is valid, but not every browser can decode every codec inside MP4. AC-3, HEVC and AV1 in particular may not play in some browsers, even though the file itself is correct.

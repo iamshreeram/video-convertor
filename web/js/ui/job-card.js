@@ -19,6 +19,13 @@ const STATE_INFO = {
     stage: "Reading the file structure\u2026",
     progressLabel: "Analyzing",
   },
+  reencoding: {
+    label: "Preparing audio",
+    tone: "info",
+    iconName: "layers",
+    stage: "Re-encoding the audio (Vorbis to AAC)\u2026",
+    progressLabel: "Preparing audio",
+  },
   converting: {
     label: "Converting",
     tone: "info",
@@ -438,6 +445,7 @@ export function createJobCard(job, { onCancel, onRemove } = {}) {
   /** @param {object} job @returns {string} display state (finalizing is a converting sub-stage) */
   function displayState(job) {
     if (base === "converting" && job.stage === "finalizing") return "finalizing";
+    if (base === "analyzing" && job.stage === "reencoding-audio") return "reencoding";
     return base;
   }
 

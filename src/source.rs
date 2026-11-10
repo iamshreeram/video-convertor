@@ -61,6 +61,79 @@ impl<S: Source + ?Sized> Source for &mut S {
     }
 }
 
+/// A source with no bytes (used when there is no extra data).
+pub struct EmptySource;
+
+impl Source for EmptySource {
+    fn len(&self) -> u64 {
+        0
+    }
+
+    fn read_at(&mut self, _offset: u64, buf: &mut [u8]) -> Result<()> {
+        if buf.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Io("read past end of input".into()))
+        }
+    }
+}
+
+/// `primary` followed by `extra` as one address space: offsets `< primary.len()` read the
+/// primary source, the rest read `extra`. Reads that straddle the boundary are split.
+pub struct ConcatSource<A: Source, B: Source> {
+    primary: A,
+    extra: B,
+    primary_len: u64,
+}
+
+impl<A: Source, B: Source> ConcatSource<A, B> {
+    pub fn new(primary: A, extra: B) -> Self {
+        let primary_len = primary.len();
+        ConcatSource {
+            primary,
+            extra,
+            primary_len,
+        }
+    }
+
+    /// The primary source alone (its own `len()`), e.g. for scanning the original file.
+    pub fn primary_mut(&mut self) -> &mut A {
+        &mut self.primary
+    }
+
+    pub fn primary_len(&self) -> u64 {
+        self.primary_len
+    }
+}
+
+impl<A: Source, B: Source> Source for ConcatSource<A, B> {
+    fn len(&self) -> u64 {
+        self.primary_len.saturating_add(self.extra.len())
+    }
+
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        let end = offset
+            .checked_add(buf.len() as u64)
+            .ok_or_else(|| Error::Io("read range overflows".into()))?;
+        if end > self.len() {
+            return Err(Error::Io("read past end of input".into()));
+        }
+        if buf.is_empty() {
+            return Ok(());
+        }
+        if end <= self.primary_len {
+            return self.primary.read_at(offset, buf);
+        }
+        if offset >= self.primary_len {
+            return self.extra.read_at(offset - self.primary_len, buf);
+        }
+        let split = (self.primary_len - offset) as usize;
+        let (head, tail) = buf.split_at_mut(split);
+        self.primary.read_at(offset, head)?;
+        self.extra.read_at(0, tail)
+    }
+}
+
 impl Sink for Vec<u8> {
     fn write(&mut self, data: &[u8]) -> Result<()> {
         self.try_reserve(data.len())
