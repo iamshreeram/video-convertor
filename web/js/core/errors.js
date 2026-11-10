@@ -93,6 +93,43 @@ const RULES = [
     },
   },
   {
+    // The browser answered a write with a value that is not a byte count. Its meaning is not
+    // documented, so the text names no cause.
+    prefix: "output rejected",
+    code: "OUTPUT_REJECTED",
+    title: "The browser refused to save the converted file",
+    hint: "",
+    hintFor: (details) => {
+      const m = /after (\d+)(?: of (\d+))? bytes/.exec(details);
+      const done = m ? formatBytes(Number(m[1])) : "part";
+      const total = m && m[2] ? ` of ${formatBytes(Number(m[2]))}` : "";
+      return (
+        `The browser stopped accepting data after ${done}${total} and did not say why, so the cause is ` +
+        "not known. Its private storage may be failing on this computer. In Chrome or Edge you can " +
+        "choose where to save the converted file instead, which avoids that storage. Otherwise close " +
+        "other tabs or restart the browser, make sure security software is not scanning the " +
+        "browser\u2019s profile folder, and try again."
+      );
+    },
+  },
+  {
+    prefix: "save denied",
+    code: "SAVE_DENIED",
+    title: "Saving to that file wasn\u2019t allowed",
+    hint:
+      "The browser did not allow writing to the file you chose. Choose the location again and allow " +
+      "access if asked, or pick another folder (system folders such as Windows or Program Files are " +
+      "not allowed).",
+  },
+  {
+    prefix: "save error",
+    code: "SAVE_FAILED",
+    title: "Couldn\u2019t write to the file you chose",
+    hint:
+      "The browser could not write to that file. Check that it is not open in another program, that " +
+      "the drive has free space and that you may write to that folder, then choose the location again.",
+  },
+  {
     prefix: "output error",
     code: "OUTPUT_ERROR",
     title: "Couldn\u2019t save the converted file",
@@ -134,6 +171,24 @@ const RULES = [
     hint: "The file could not be read. Check that it still exists and is not being changed, then try again.",
   },
 ];
+
+/** Failures that writing straight to a file the user chooses can get around. */
+const SAVE_TO_FILE_CODES = new Set([
+  "STORAGE_FULL",
+  "OUTPUT_REJECTED",
+  "OUTPUT_ERROR",
+  "MEMORY_BUDGET",
+  "SAVE_DENIED",
+  "SAVE_FAILED",
+]);
+
+/**
+ * @param {unknown} code an error code from describeError
+ * @returns {boolean} whether choosing a file to save to is a sensible next step
+ */
+export function offersSaveToFile(code) {
+  return typeof code === "string" && SAVE_TO_FILE_CODES.has(code);
+}
 
 /**
  * Extracts the original message text from a string, an Error-like object or

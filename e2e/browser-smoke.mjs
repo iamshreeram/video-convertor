@@ -2036,6 +2036,301 @@ async function testT30(env) {
   return `preflight refused in ${preflightSecs.toFixed(1)} s with sizes; mid-copy cut reported "${details.trim().slice(0, 80)}"`;
 }
 
+// ---------- T31-T35: save straight to a file the user chooses ----------
+
+// showSaveFilePicker opens a native dialog that a headless browser cannot drive, so these tests
+// replace it with a function that returns a handle to a file in the browser's private storage.
+// That is the same kind of object (a FileSystemFileHandle: it can be sent to the worker and has
+// createWritable), so the worker code under test is the real one. It also records whether the
+// call happened while the click that opened it was still an active user gesture, which the real
+// function requires.
+const PICKER_PATCH = {
+  fn: () => {
+    window.__picker = { mode: "ok", calls: [], count: 0 };
+    window.showSaveFilePicker = async (options) => {
+      const picker = window.__picker;
+      picker.calls.push({
+        suggestedName: options?.suggestedName ?? null,
+        types: options?.types ?? null,
+        active: navigator.userActivation ? navigator.userActivation.isActive : null,
+      });
+      if (picker.mode === "abort") {
+        throw new DOMException("The user aborted a request.", "AbortError");
+      }
+      const root = await navigator.storage.getDirectory();
+      const name = `saved-${++picker.count}.mp4`;
+      const handle = await root.getFileHandle(name, { create: true });
+      if (picker.mode === "locked") {
+        // an exclusive writer held by the page: any other writer is refused, like a file that
+        // another program has open
+        picker.lock = await handle.createWritable({ mode: "exclusive" });
+      }
+      return handle;
+    };
+  },
+};
+
+const NO_PICKER_PATCH = {
+  fn: () => {
+    Object.defineProperty(window, "showSaveFilePicker", { configurable: true, value: undefined });
+  },
+};
+
+// A page whose browser storage looks too small and whose memory budget is tiny, so any
+// conversion fails up front with STORAGE_FULL (the card then offers "Save to a file").
+async function storageFullPage(env, extraInit = [PICKER_PATCH]) {
+  const context = await newContext(env, extraInit);
+  await patchStorageEstimate(context, { quota: 1_000, usage: 0 });
+  return openPageIn(env, context, `${shared.root}?membudget=100`);
+}
+
+async function opfsAllNames(page) {
+  return page.evaluate(async () => {
+    const root = await navigator.storage.getDirectory();
+    const names = [];
+    for await (const [name] of root.entries()) {
+      names.push(name);
+    }
+    return names.sort();
+  });
+}
+
+// A (small) file from the browser's private storage, as a Buffer.
+async function readOpfsFile(page, name) {
+  const b64 = await page.evaluate(async (fileName) => {
+    const root = await navigator.storage.getDirectory();
+    const file = await (await root.getFileHandle(fileName)).getFile();
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    let text = "";
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    }
+    return btoa(text);
+  }, name);
+  return Buffer.from(b64, "base64");
+}
+
+async function setPickerMode(page, mode) {
+  await page.evaluate(async (m) => {
+    const picker = window.__picker;
+    if (picker.lock) {
+      await picker.lock.abort().catch(() => {});
+      picker.lock = null;
+    }
+    picker.mode = m;
+  }, mode);
+}
+
+const pickerCalls = (page) => page.evaluate(() => window.__picker.calls);
+
+async function clickSaveToFile(page, pick) {
+  const button = cardOf(page, pick).locator(testid("job-save-to-file"));
+  assert((await button.count()) === 1, "the failed card has no 'Save to a file' button");
+  await button.click();
+}
+
+// After a click on "Save to a file" the card leaves "error" (picker, queue) and ends in done/error.
+async function waitSaveRun(page, pick, timeout = 120000) {
+  await waitCard(page, pick, ["queued", "analyzing", "converting", "done"], 30000, 25);
+  return waitCard(page, pick, ["done", "error"], timeout);
+}
+
+async function testT31(env) {
+  const src = fixture("h264_aac");
+  const refPage = await openApp(env, { url: shared.root });
+  const ref = await convertOne(refPage, src);
+  await expectDone(refPage, ref.pick, ref.state);
+  const refFile = path.join(WORK, "t31-ref.mp4");
+  await downloadFrom(refPage, ref.pick, refFile);
+
+  const page = await storageFullPage(env);
+  const first = await convertOne(page, src);
+  assert(first.state === "error", `expected the forced storage error, got ${first.state}`);
+  const code = (await cardOf(page, first.pick).locator(testid("job-error-code")).textContent()).trim();
+  assert(code === "STORAGE_FULL", `code ${code}`);
+  const label = await cardOf(page, first.pick).locator(testid("job-save-to-file")).getAttribute("aria-label");
+  assert(/h264_aac\.mp4/.test(label || ""), `button name does not carry the file name: "${label}"`);
+
+  await clickSaveToFile(page, first.pick);
+  const state = await waitSaveRun(page, first.pick);
+  await expectDone(page, first.pick, state);
+
+  const card = cardOf(page, first.pick);
+  const note = await cardText(page, first.pick, testid("job-saved-note"));
+  assert(/Saved to disk as saved-1\.mp4/.test(note), `saved note: "${note}"`);
+  assert((await card.locator(testid("job-download")).count()) === 0, "a Download link is shown for a file that was saved to disk");
+  assert((await card.locator(testid("job-preview-toggle")).count()) === 0, "a preview toggle is shown without a blob");
+  assert((await card.locator(testid("job-error")).count()) === 0, "the old error panel is still shown");
+  const calls = await pickerCalls(page);
+  assert(calls.length === 1, `picker called ${calls.length} times`);
+  assert(calls[0].suggestedName === "h264_aac.mp4", `suggested name ${calls[0].suggestedName}`);
+  assert(calls[0].types?.[0]?.accept?.["video/mp4"]?.includes(".mp4"), `types ${JSON.stringify(calls[0].types)}`);
+  assert(calls[0].active === true, "the picker was opened without an active user gesture (the real one would refuse)");
+  assert((await opfsOutNames(page)).length === 0, "the private-storage output path was used although a file was chosen");
+
+  const dest = path.join(WORK, "t31-saved.mp4");
+  fs.writeFileSync(dest, await readOpfsFile(page, "saved-1.mp4"));
+  const sameBytes = (await sha256File(dest)) === (await sha256File(refFile));
+  assert(sameBytes, "the file saved through the chosen-file path differs from the normal conversion");
+  const { problems } = await verifyOutput(src, dest, null);
+  assert(problems.length === 0, problems.join("; "));
+
+  // removing the card must not delete the user's file
+  await card.locator(testid("job-remove")).click();
+  await sleep(500);
+  assert((await opfsAllNames(page)).includes("saved-1.mp4"), "removing the card deleted the saved file");
+  return `saved ${fs.statSync(dest).size} B straight to the chosen file, byte-identical to the normal conversion, valid per ffprobe`;
+}
+
+async function testT32(env) {
+  const src = fixture("h264_vorbis");
+  if (!fs.existsSync(src)) {
+    skip("no h264_vorbis.mkv fixture (needs ffmpeg with libvorbis)");
+  }
+  const page = await storageFullPage(env);
+  const lines = recordConsole(page);
+  const first = await convertOne(page, src);
+  const record = lines.filter((l) => l.type === "log" && l.text.includes('"schema": 1')).map((l) => JSON.parse(l.text)).at(-1);
+  assert(first.state === "error", `expected the forced storage error, got ${first.state} (storage ${JSON.stringify(record?.storage)})`);
+  await clickSaveToFile(page, first.pick);
+  const state = await waitSaveRun(page, first.pick);
+  await expectDone(page, first.pick, state);
+  const warnings = await cardText(page, first.pick, testid("job-warnings"));
+  assert(/re-encoded to (AAC|Opus)/.test(warnings), `no re-encode notice: "${warnings}"`);
+
+  const dest = path.join(WORK, "t32-saved.mp4");
+  fs.writeFileSync(dest, await readOpfsFile(page, "saved-1.mp4"));
+  const out = await probeFull(dest);
+  const video = out.streams.find((x) => x.type === "video");
+  const audio = out.streams.find((x) => x.type === "audio");
+  assert(video && video.codec === "h264", `video stream: ${JSON.stringify(out.streams)}`);
+  assert(audio && ["aac", "opus"].includes(audio.codec) && audio.channels === 2, `audio stream: ${JSON.stringify(out.streams)}`);
+  const dec = await ffmpegDecode(dest, null);
+  assert(dec.code === 0 && dec.lines.length === 0, `does not decode cleanly: ${dec.lines.slice(0, 2).join(" / ")}`);
+  assert(Math.abs(out.duration - 3) < 0.25, `duration ${out.duration}`);
+  const vol = await meanVolumeDb(dest);
+  assert(vol !== null && vol > -60, `output audio is silent (mean ${vol} dB)`);
+  return `re-encoded ${audio.codec} audio and video written through the chosen file: valid, ${out.duration.toFixed(2)} s, mean ${vol} dB`;
+}
+
+async function testT33(env) {
+  const src = fixture("h264_aac");
+  const page = await storageFullPage(env);
+  const first = await convertOne(page, src);
+  assert(first.state === "error", `expected the forced storage error, got ${first.state}`);
+
+  // closing the dialog is not an error: the card stays failed and the button keeps working
+  await setPickerMode(page, "abort");
+  await clickSaveToFile(page, first.pick);
+  await sleep(600);
+  assert((await stateOfPick(page, first.pick)) === "error", "cancelling the dialog changed the card");
+  assert((await pickerCalls(page)).length === 1, "the dialog was not opened");
+  assert((await cardOf(page, first.pick).locator(testid("job-save-to-file")).count()) === 1, "button vanished after cancelling the dialog");
+
+  // a chosen file that cannot be written (another program has it open) is its own, accurate error
+  await setPickerMode(page, "locked");
+  await clickSaveToFile(page, first.pick);
+  await waitUntil(
+    async () => (await cardText(page, first.pick, testid("job-error-code"))) === "SAVE_FAILED",
+    60000,
+    `the unwritable chosen file did not end as SAVE_FAILED`,
+  ).catch(async (err) => {
+    throw new Error(`${err.message} (card state ${await stateOfPick(page, first.pick)}, files ${JSON.stringify(await opfsAllNames(page))})`);
+  });
+  const title = await cardText(page, first.pick, ".job__error-title");
+  assert(/write to the file you chose/.test(title), `title "${title}"`);
+  const details = await cardText(page, first.pick, `${testid("job-error-details")} code`);
+  assert(/^save error: NoModificationAllowedError/.test(details), `details "${details}"`);
+  assert((await cardOf(page, first.pick).locator(testid("job-save-to-file")).count()) === 1, "no way to choose another file");
+
+  // and the next attempt works
+  await setPickerMode(page, "ok");
+  await clickSaveToFile(page, first.pick);
+  const state = await waitSaveRun(page, first.pick);
+  await expectDone(page, first.pick, state);
+  const note = await cardText(page, first.pick, testid("job-saved-note"));
+  assert(/saved-2\.mp4/.test(note), `saved note "${note}"`);
+  return "dialog cancelled -> still failed; unwritable file -> SAVE_FAILED with the browser's error; next try saved";
+}
+
+// Big file, cancelled while it is being written to the chosen file: nothing is left behind.
+async function testT34(env) {
+  const base = await ensureSample("big_storage", [
+    "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=25",
+    "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+    "-t", "450", "-c:v", "libx264", "-preset", "ultrafast", "-b:v", "24M", "-maxrate", "24M", "-bufsize", "48M",
+    "-c:a", "aac", "-b:a", "128k",
+  ]);
+  const page = await storageFullPage(env);
+  const first = await convertOne(page, base, 300000);
+  assert(first.state === "error", `expected the forced storage error, got ${first.state}`);
+  assert(/STORAGE_FULL/.test(await cardText(page, first.pick, testid("job-error-code"))), "not a STORAGE_FULL error");
+  await clickSaveToFile(page, first.pick);
+  await waitUntil(
+    async () => {
+      const progress = await cardOf(page, first.pick).locator(testid("job-progress")).getAttribute("aria-valuenow");
+      return Number(progress) >= 5;
+    },
+    300000,
+    "the save never reached 5 %",
+    50,
+  );
+  assert((await stateOfPick(page, first.pick)) === "converting", "not converting");
+  await cardOf(page, first.pick).locator(testid("job-cancel")).click();
+  assert((await waitCard(page, first.pick, ["cancelled"], 15000)) === "cancelled", "not cancelled");
+  await waitUntil(
+    async () => (await opfsAllNames(page)).length === 0,
+    30000,
+    `the half-written file was left behind: ${JSON.stringify(await opfsAllNames(page))}`,
+    250,
+  );
+
+  // Then the same big file, saved to the end: the worker verifies the size on disk, and the file
+  // must be about as large as the input (a remux copies the compressed data).
+  const second = await convertOne(page, base, 300000);
+  assert(second.state === "error", `expected the forced storage error, got ${second.state}`);
+  await clickSaveToFile(page, second.pick);
+  const state = await waitSaveRun(page, second.pick, 600000);
+  await expectDone(page, second.pick, state);
+  const names = (await opfsAllNames(page)).filter((n) => /^saved-/.test(n));
+  assert(names.length === 1, `expected one saved file, found ${JSON.stringify(names)}`);
+  const savedSize = await page.evaluate(async (name) => {
+    const root = await navigator.storage.getDirectory();
+    return (await (await root.getFileHandle(name)).getFile()).size;
+  }, names[0]);
+  const inputSize = fs.statSync(base).size;
+  assert(Math.abs(savedSize - inputSize) / inputSize < 0.02, `saved ${savedSize} B from a ${inputSize} B input`);
+  const note = await cardText(page, second.pick, testid("job-saved-note"));
+  assert(note.includes(names[0]), `saved note "${note}"`);
+  await page.evaluate(async (name) => {
+    const root = await navigator.storage.getDirectory();
+    await root.removeEntry(name);
+  }, names[0]);
+  return `cancel while writing left no partial file; a full ${(savedSize / 2 ** 20).toFixed(0)} MiB save to the chosen file completed and the size on disk was verified`;
+}
+
+// The button only appears when it can help and the browser supports it.
+async function testT35(env) {
+  // a failure that choosing a file cannot fix
+  const garbage = path.join(WORK, "t35-garbage.mkv");
+  fs.writeFileSync(garbage, randomBytes(4096));
+  const context = await newContext(env, [PICKER_PATCH]);
+  const page = await openPageIn(env, context, shared.root);
+  const bad = await convertOne(page, garbage);
+  assert(bad.state === "error", `expected an error, got ${bad.state}`);
+  assert((await cardOf(page, bad.pick).locator(testid("job-save-to-file")).count()) === 0, "the button is offered for a damaged input file");
+
+  // a browser without the save dialog
+  const noPicker = await storageFullPage(env, [NO_PICKER_PATCH]);
+  const full = await convertOne(noPicker, fixture("h264_aac"));
+  assert(full.state === "error", `expected the forced storage error, got ${full.state}`);
+  assert(/STORAGE_FULL/.test(await cardText(noPicker, full.pick, testid("job-error-code"))), "wrong code");
+  assert((await cardOf(noPicker, full.pick).locator(testid("job-save-to-file")).count()) === 0, "the button is offered without showSaveFilePicker");
+  const hint = await cardText(noPicker, full.pick, ".job__error-hint");
+  assert(hint.length > 20, "the error has no explanation");
+  return "no button for a damaged file or without showSaveFilePicker; error text still present";
+}
+
 const TESTS = [
   { id: "T1", title: "OPFS convert h264_aac at /video-convertor/ (chips, download, ffprobe, preview)", timeoutMs: 300000, run: testT1 },
   { id: "T2", title: "in-memory sink (?nofs=1) gives the same bytes, no OPFS files", timeoutMs: 300000, run: testT2 },
@@ -2068,6 +2363,11 @@ const TESTS = [
   { id: "T28", title: "error panel: code, copy-diagnostics button, [mkv2mp4] console records, no file name leaked; input scanned once", timeoutMs: 300000, run: testT28 },
   { id: "T29", title: "browser storage estimate too small: small results fall back to memory (no OPFS file)", timeoutMs: 300000, run: testT29 },
   { id: "T30", title: "large result, too little storage: refused up front with sizes; quota cut while copying is reported with progress", big: true, timeoutMs: 1800000, run: testT30 },
+  { id: "T31", title: "failed card -> Save to a file: written straight to the chosen file, byte-identical, no private-storage output", timeoutMs: 300000, run: testT31 },
+  { id: "T32", title: "Save to a file with re-encoded Vorbis audio: valid MP4 with audio", timeoutMs: 300000, run: testT32 },
+  { id: "T33", title: "save dialog cancelled -> card unchanged; unwritable file -> SAVE_FAILED; next try works", timeoutMs: 300000, run: testT33 },
+  { id: "T34", title: "big file to a chosen file: cancel leaves nothing behind; a full save completes with the size verified", big: true, timeoutMs: 1800000, run: testT34 },
+  { id: "T35", title: "Save-to-file button only where it can help (not for damaged files, not without the save dialog)", timeoutMs: 300000, run: testT35 },
 ];
 
 // ---------- main ----------

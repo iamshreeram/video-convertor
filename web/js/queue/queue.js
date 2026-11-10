@@ -173,6 +173,36 @@ export function createQueue(options = {}) {
       };
     },
 
+    /**
+     * Puts a failed job back in the queue (same card, same place in the order) so it runs again.
+     * Everything the failed run left on the job is cleared; `patch` supplies new fields for the
+     * run (reserved fields are ignored). Only a job in the "error" state can be retried.
+     * @param {number} id
+     * @param {object} [patch]
+     * @returns {boolean} whether the job was queued again
+     */
+    retry(id, patch) {
+      const rec = find(id);
+      if (!rec || rec.cancelled || rec.job.state !== "error") return false;
+      for (const key of Object.keys(rec.job)) {
+        if (!RESERVED.has(key)) delete rec.job[key];
+      }
+      if (patch && typeof patch === "object") {
+        for (const key of Object.keys(patch)) {
+          if (!RESERVED.has(key)) rec.job[key] = patch[key];
+        }
+      }
+      rec.job.state = "queued";
+      rec.job.error = null;
+      rec.job.result = null;
+      rec.settled = false;
+      rec.cancelRan = false;
+      rec.cancelFns = [];
+      notify();
+      schedulePump();
+      return true;
+    },
+
     /** Cancels a queued or running job; no-op for finished or unknown ids. */
     cancel(id) {
       const rec = find(id);

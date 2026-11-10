@@ -132,26 +132,76 @@ export function storageFullMessage(a) {
   );
 }
 
+/** @param {number} position @param {unknown} total @returns {string} "after 12 of 34 bytes" */
+function progressText(position, total) {
+  const of = isNum(total) && total > 0 ? ` of ${total}` : "";
+  return `after ${isNum(position) ? position : 0}${of} bytes`;
+}
+
 /**
- * Turns a failed output write into an error code and message.
- * A short write or QuotaExceededError means the storage is full; anything else is a generic
- * output error that keeps the browser's own error name and text.
+ * The browser's own number for a write that was refused. A sync access handle returned
+ * 4294967288 on a failing Chrome; that is -8 read as an unsigned 32-bit value, so numbers
+ * that only fit unsigned are shown signed. Non-integers are shown as they are.
+ * @param {number} written
+ * @returns {string}
+ */
+function browserCode(written) {
+  if (Number.isInteger(written) && written > 0x7fffffff && written <= 0xffffffff) {
+    return String(written - 0x100000000);
+  }
+  return String(written);
+}
+
+/**
+ * Turns a failed write into the browser's private storage (OPFS) into an error code and message.
+ * - a short write, or QuotaExceededError: the storage is full;
+ * - a "written" value that is not a whole number from 0 to the number of bytes handed over
+ *   (more than was given, negative, NaN, or a 32-bit error code): the browser refused the write.
+ *   This is reported as such: the cause is not known, so it is never called "storage full";
+ * - anything else keeps the browser's own error name and text.
  * @param {{name?: string, message?: string, written?: number, expected?: number,
  *          position?: number, total?: number}} f
- * @returns {{code: "STORAGE_FULL"|"OUTPUT_ERROR", message: string}}
+ * @returns {{code: "STORAGE_FULL"|"OUTPUT_REJECTED"|"OUTPUT_ERROR", message: string}}
  */
 export function classifyWriteFailure(f) {
-  const shortWrite = isNum(f.written) && isNum(f.expected) && f.written < f.expected;
-  if (shortWrite || f.name === "QuotaExceededError") {
-    const of = isNum(f.total) && f.total > 0 ? ` of ${f.total}` : "";
-    const position = isNum(f.position) ? f.position : 0;
-    return {
-      code: "STORAGE_FULL",
-      message: `storage full: disk write failed after ${position}${of} bytes`,
-    };
+  const where = progressText(f.position, f.total);
+  if (f.name === "QuotaExceededError") {
+    return { code: "STORAGE_FULL", message: `storage full: disk write failed ${where}` };
+  }
+  if (typeof f.written === "number") {
+    const whole = Number.isInteger(f.written) && f.written >= 0;
+    const expected = isNum(f.expected) ? f.expected : null;
+    if (whole && expected !== null && f.written < expected) {
+      return { code: "STORAGE_FULL", message: `storage full: disk write failed ${where}` };
+    }
+    if (!whole || (expected !== null && f.written > expected)) {
+      return {
+        code: "OUTPUT_REJECTED",
+        message: `output rejected: the browser refused a write ${where} (browser code ${browserCode(f.written)})`,
+      };
+    }
   }
   const name = f.name || "Error";
   return { code: "OUTPUT_ERROR", message: `output error: ${name}: ${f.message ?? ""}`.trimEnd() };
+}
+
+/**
+ * Turns a failed write into a file the user chose (File System Access API) into a code and message.
+ * @param {{name?: string, message?: string, position?: number, total?: number}} f
+ * @returns {{code: "STORAGE_FULL"|"SAVE_DENIED"|"SAVE_FAILED", message: string}}
+ */
+export function classifySaveFailure(f) {
+  const name = f.name || "Error";
+  if (name === "QuotaExceededError") {
+    return {
+      code: "STORAGE_FULL",
+      message: `storage full: disk write failed ${progressText(f.position, f.total)}`,
+    };
+  }
+  if (name === "NotAllowedError" || name === "SecurityError") {
+    return { code: "SAVE_DENIED", message: `save denied: ${name}: ${f.message ?? ""}`.trimEnd() };
+  }
+  return { code: "SAVE_FAILED", message: `save error: ${name}: ${f.message ?? ""}`.trimEnd() };
 }
 
 /**

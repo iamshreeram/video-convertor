@@ -25,6 +25,7 @@ Site: <https://iamshreeram.github.io/video-convertor/>
 - **Cancel.** Queued and running jobs can be cancelled. A cancelled run's partial output is removed.
 - **Lazy preview.** A video player is created only when you press **Preview**, and it is removed when you close it. Nothing is loaded in the background.
 - **Download.** Finished files are offered as `<name>.mp4`.
+- **Save to a file.** If the browser's own storage cannot hold or accept the result, the failed card offers **Save to a file…** (Chrome and Edge on desktop). You pick a file in your normal save dialog and the conversion runs again, writing straight to it: nothing is kept in browser storage or memory, so it works for results of any size your disk can hold. The size on disk is checked when it finishes. Cancelling or failing removes the empty file the dialog created; a file that already had content is left as it was.
 - **Dark mode.** Light, dark or automatic (follows the system). The choice is stored locally in the browser.
 - **Keyboard accessible.** Every control can be reached and operated from the keyboard. Dialogs trap focus and close with Esc. State changes are announced to screen readers.
 - **Responsive.** The sidebar collapses to a tab bar on narrow screens. `prefers-reduced-motion` disables animation.
@@ -223,6 +224,7 @@ The site is then live at <https://iamshreeram.github.io/video-convertor/>.
 - **"Could not start the secure worker in this browser"**: the browser did not run the blob bootstrap in time. Use a current Chrome, Edge, Firefox or Safari.
 - **"no supported tracks"**: the file has no video or audio track in one of the supported codecs (see the table above). Transcode it with ffmpeg first.
 - **"Not enough memory to hold this file"**: the browser has no OPFS and the output would exceed the 1.5 GiB in-memory budget. Download or remove finished files, or use a browser with OPFS support.
+- **"The browser refused to save the converted file"** (code `OUTPUT_REJECTED`): the browser's private storage accepted fewer bytes than were written. The cause is not known (it is not necessarily a full disk). Use **Save to a file…** on the card, which bypasses that storage, and copy the diagnostics from the card if you report it.
 - **Download works but the video does not play**: the MP4 is valid, but the browser may not decode that codec inside MP4 (AC-3, HEVC and AV1 are the usual cases). Try another browser, or transcode with ffmpeg.
 - **CI fails at "Check shipped files for external URLs"**: a shipped file contains an `http(s)://` address. Remove it or load the resource from the same origin. The job prints the offending files.
 - **CI fails at "Commit built site to gh-pages"** with a permission error: set Workflow permissions to Read and write (see setup above).

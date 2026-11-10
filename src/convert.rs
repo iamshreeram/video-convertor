@@ -2,7 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::mkv::{scan, AudioInfo, Mkv, SampleRef, TrackKind, READ_MAX_WINDOW, READ_MIN_WINDOW};
-use crate::mp4::{build_header, write_mp4};
+use crate::mp4::{build_header, write_mp4, Mp4Stream};
 use crate::plan::{build_plan, Plan};
 use crate::source::{BufferedSource, ConcatSource, EmptySource, Sink, Source};
 
@@ -59,20 +59,35 @@ pub fn convert_with_replacements<S: Source, E: Source, K: Sink>(
     let analysis = analyze(&mut combined, replacements, &mut |pos, len| {
         reporter.report(scan_fraction(pos, len))
     })?;
-    write_and_report(
-        analysis,
-        &mut combined,
-        sink,
-        opts,
-        &mut reporter,
-        SCAN_SHARE,
-    )
+    write_and_report(analysis, combined, sink, opts, &mut reporter, SCAN_SHARE)
+}
+
+/// Fails with `TooLarge` when the exact output size is above the limit (nothing is written yet).
+fn check_limit(total_size: u64, opts: &ConvertOptions) -> Result<()> {
+    if let Some(limit) = opts.max_output_bytes {
+        if total_size > limit {
+            return Err(Error::TooLarge(format!(
+                "output would be {total_size} bytes, limit is {limit}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Read-ahead window for the write phase. Only the file is windowed: the re-encoded packets
+/// (`extra`) sit far past its end, and one window over both was evicted at every switch between
+/// the video in the file and that audio, so the file was read about 24 times over.
+fn windowed<A: Source, B: Source>(
+    combined: ConcatSource<A, B>,
+) -> ConcatSource<BufferedSource<A>, B> {
+    let (primary, extra) = combined.into_parts();
+    ConcatSource::new(BufferedSource::new(primary, READ_WINDOW_BYTES), extra)
 }
 
 /// Size check, then the write phase. `base` is the progress already used by earlier phases.
 fn write_and_report<A: Source, B: Source, K: Sink>(
     analysis: Analysis,
-    combined: &mut ConcatSource<A, B>,
+    combined: ConcatSource<A, B>,
     sink: &mut K,
     opts: &ConvertOptions,
     reporter: &mut Progress<'_>,
@@ -87,22 +102,52 @@ fn write_and_report<A: Source, B: Source, K: Sink>(
 
     // Exact size check before anything reaches the sink. (The header is rebuilt inside
     // write_mp4; only its size is kept, so the two copies never coexist.)
-    if let Some(limit) = opts.max_output_bytes {
-        if total_size > limit {
-            return Err(Error::TooLarge(format!(
-                "output would be {total_size} bytes, limit is {limit}"
-            )));
-        }
-    }
+    check_limit(total_size, opts)?;
 
     // Write phase: slice reads are at most 1 MiB; the 4 MiB window absorbs the A/V interleave.
-    let mut write_src = BufferedSource::new(&mut *combined, READ_WINDOW_BYTES);
+    let mut write_src = windowed(combined);
     let output_size = write_mp4(&plan, &mut write_src, sink, &mut |done, total| {
         reporter.report(write_fraction(done, total, base));
     })?;
     reporter.report(1.0);
 
     build_report(mkv, &plan, output_size)
+}
+
+/// A conversion that hands the MP4 out block by block ([`Scanned::into_stream`]). The caller
+/// pulls a block, writes it (possibly asynchronously) and pulls the next one.
+pub struct ConvertStream<S: Source, E: Source> {
+    src: ConcatSource<BufferedSource<S>, E>,
+    stream: Mp4Stream<Plan>,
+    report: ConvertReport,
+}
+
+impl<S: Source, E: Source> ConvertStream<S, E> {
+    /// The report of the conversion; complete before the first block, because the plan fixes
+    /// every number in it (`output_size` is the exact size of all blocks together).
+    pub fn report(&self) -> &ConvertReport {
+        &self.report
+    }
+
+    /// Exact size of the whole MP4.
+    pub fn total_size(&self) -> u64 {
+        self.stream.total_size()
+    }
+
+    /// Replaces `out` with the next block; `Ok(false)` (with `out` empty) once all of it was
+    /// handed out. The first block is the MP4 header.
+    pub fn next_block(&mut self, out: &mut Vec<u8>) -> Result<bool> {
+        self.stream.next_block(&mut self.src, out)
+    }
+
+    /// Share of the payload handed out so far, in [0, 1].
+    pub fn fraction(&self) -> f64 {
+        let total = self.stream.payload_total();
+        if total == 0 {
+            return if self.stream.is_finished() { 1.0 } else { 0.0 };
+        }
+        (self.stream.payload_done() as f64 / total as f64).clamp(0.0, 1.0)
+    }
 }
 
 /// One encoded packet of a replacement track; its bytes are stored back to back in `extra`.
@@ -493,7 +538,35 @@ impl Scanned {
         };
         reporter.report(0.0);
         let analysis = analyze_scanned(self.mkv, self.file_len, &mut combined, replacements)?;
-        write_and_report(analysis, &mut combined, sink, opts, &mut reporter, 0.0)
+        write_and_report(analysis, combined, sink, opts, &mut reporter, 0.0)
+    }
+
+    /// Like [`Scanned::convert`], but returns a stream the caller pulls blocks from, for sinks
+    /// that cannot be written synchronously. Plans and checks the size limit now (nothing has
+    /// been read from the payload yet); the blocks are byte-identical to what `convert` writes.
+    pub fn into_stream<S: Source, E: Source>(
+        self,
+        src: S,
+        extra: E,
+        replacements: &[TrackReplacement],
+        opts: &ConvertOptions,
+    ) -> Result<ConvertStream<S, E>> {
+        let mut combined = ConcatSource::new(src, extra);
+        let analysis = analyze_scanned(self.mkv, self.file_len, &mut combined, replacements)?;
+        let Analysis {
+            mkv,
+            plan,
+            total_size,
+            ..
+        } = analysis;
+        check_limit(total_size, opts)?;
+        let report = build_report(mkv, &plan, total_size)?;
+        let stream = Mp4Stream::new(plan)?;
+        Ok(ConvertStream {
+            src: windowed(combined),
+            stream,
+            report,
+        })
     }
 }
 

@@ -534,6 +534,25 @@
   list-style: disc;
 }
 
+.job__saved {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: 10px 14px;
+  border: 1px solid var(--success-border);
+  border-radius: var(--radius-md);
+  background: var(--success-soft);
+  color: var(--text);
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
+
+.job__saved svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--success);
+}
+
 .job__error {
   display: flex;
   flex-direction: column;

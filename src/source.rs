@@ -104,6 +104,11 @@ impl<A: Source, B: Source> ConcatSource<A, B> {
     pub fn primary_len(&self) -> u64 {
         self.primary_len
     }
+
+    /// Gives the two sources back, e.g. to wrap only the primary one in a read-ahead window.
+    pub fn into_parts(self) -> (A, B) {
+        (self.primary, self.extra)
+    }
 }
 
 impl<A: Source, B: Source> Source for ConcatSource<A, B> {

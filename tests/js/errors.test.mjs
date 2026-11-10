@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { describeError, describeWarning } from "../../web/js/core/errors.js";
+import { describeError, describeWarning, offersSaveToFile } from "../../web/js/core/errors.js";
 
 test("describeError maps engine messages to friendly titles with hints and keeps the original text", () => {
   const cases = [
@@ -113,5 +113,38 @@ test("every described error carries a stable code", () => {
   };
   for (const [msg, code] of Object.entries(cases)) {
     assert.equal(describeError(msg).code, code, msg);
+  }
+});
+
+test("a refused write says what happened, does not blame a cause it cannot know, and points at the alternative", () => {
+  const d = describeError(
+    "output rejected: the browser refused a write after 249000000 of 1629000000 bytes (browser code -8)",
+  );
+  assert.equal(d.code, "OUTPUT_REJECTED");
+  assert.equal(d.title, "The browser refused to save the converted file");
+  assert.match(d.hint, /237 MB of 1\.5 GB/);
+  assert.match(d.hint, /choose/i);
+  // not a claim about free space or file-size limits: the browser's code is not documented
+  assert.doesNotMatch(d.hint, /ran out of space|file size limit|too large/i);
+  assert.equal(d.details.includes("browser code -8"), true);
+  // without numbers it still reads well
+  assert.ok(describeError("output rejected: the browser refused a write after 0 bytes (browser code -8)").hint.length > 40);
+});
+
+test("errors for a file the user chose have their own text", () => {
+  const denied = describeError("save denied: NotAllowedError: The request is not allowed");
+  assert.equal(denied.code, "SAVE_DENIED");
+  assert.match(denied.hint, /allow/i);
+  const failed = describeError("save error: NoModificationAllowedError: locked");
+  assert.equal(failed.code, "SAVE_FAILED");
+  assert.match(failed.hint, /open in another program/i);
+});
+
+test("offersSaveToFile lists the failures that choosing a file can get around", () => {
+  for (const code of ["STORAGE_FULL", "OUTPUT_REJECTED", "OUTPUT_ERROR", "MEMORY_BUDGET", "SAVE_DENIED", "SAVE_FAILED"]) {
+    assert.equal(offersSaveToFile(code), true, code);
+  }
+  for (const code of ["MKV_DAMAGED", "NOT_MKV", "NO_SUPPORTED_TRACK", "TOO_LARGE", "READ_FAILED", "WORKER_STOPPED", "UNKNOWN", "", undefined, null]) {
+    assert.equal(offersSaveToFile(code), false, String(code));
   }
 });

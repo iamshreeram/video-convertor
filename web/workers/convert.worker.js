@@ -2,7 +2,9 @@
 // It posts {type:"ready"} first so the page can confirm the secure start-up
 // (DESIGN.md B3.6) before any message is sent to it.
 //
-// In:  {type:"process", file, sessionId, sweep, runId, inMemory, memoryBudgetBytes}
+// In:  {type:"process", file, sessionId, sweep, runId, inMemory, memoryBudgetBytes, outputHandle?}
+//      `outputHandle` is a FileSystemFileHandle the user picked: the MP4 is then written straight
+//      to that file (no browser-private storage, no memory) and `done` carries `saved: true`.
 //      {type:"cleanup", sessionId, runIds:[number]}
 // Out: stage | analysis | scan-progress | progress | info | done | error | cleaned
 //      `done` and `error` carry `diagnostics` (timings, I/O, storage; never the file name).
@@ -17,6 +19,7 @@ import {
   Recorder,
   assessStorage,
   buildDiagnostics,
+  classifySaveFailure,
   classifyWriteFailure,
   storageFullMessage,
 } from "../js/core/diagnostics.js";
@@ -67,7 +70,14 @@ function errorText(err) {
 }
 
 async function runProcess(msg) {
-  const state = { opfs: null, report: null, storage: null, failure: null, readFailure: null };
+  const state = {
+    opfs: null,
+    writable: null,
+    report: null,
+    storage: null,
+    failure: null,
+    readFailure: null,
+  };
   const rec = new Recorder();
   const file = msg.file;
   try {
@@ -105,6 +115,13 @@ async function runProcess(msg) {
 
     rec.begin("prepare-output");
     const outputName = makeOutputName(file.name);
+
+    // The user chose a file: write straight to it and stop here.
+    if (msg.outputHandle !== undefined && msg.outputHandle !== null) {
+      await saveToChosenFile({ msg, scan, read, replacement, report, rec, state, file, outputName, audioNote });
+      return;
+    }
+
     const budget = normaliseBudget(msg.memoryBudgetBytes);
     state.storage = { mode: "memory", needed: report.outputSize };
 
@@ -229,6 +246,8 @@ async function runProcess(msg) {
     self.close();
   } catch (err) {
     await discardOutput(state.opfs);
+    await abortQuietly(state.writable);
+    state.writable = null;
     // A failed write is reported with its own numbers instead of the engine's wrapper text.
     const message = state.failure ? state.failure.message : errorText(err);
     if (state.storage && state.failure) {
@@ -250,6 +269,120 @@ async function runProcess(msg) {
     });
     postMessage({ type: "error", message, details: message, diagnostics });
     self.close();
+  }
+}
+
+/**
+ * Converts straight into a file the user picked. The engine hands the MP4 out block by block
+ * (`stream_begin` / `stream_next`) because a writable file stream has to be awaited, which the
+ * engine's synchronous write callback cannot do. Nothing is kept in memory or in the browser's
+ * private storage; the file is only replaced when `close()` succeeds.
+ */
+async function saveToChosenFile(ctx) {
+  const { msg, scan, read, replacement, report, rec, state, file, outputName, audioNote } = ctx;
+  const handle = msg.outputHandle;
+  const total = report.outputSize;
+  let position = 0;
+  let chunkBytes = 0;
+  state.storage = { mode: "chosen file", needed: total };
+
+  /** Records why a write to the chosen file failed and returns the error to throw. */
+  const saveError = (e) => {
+    const failure = classifySaveFailure({ name: e?.name, message: e?.message, position, total });
+    state.failure = { ...failure, position, total, chunkBytes, written: null, errorName: e?.name ?? null };
+    return new Error(failure.message);
+  };
+
+  if (typeof handle.createWritable !== "function") {
+    throw saveError({ name: "TypeError", message: "the chosen file cannot be written" });
+  }
+  rec.begin("convert");
+  postMessage({ type: "stage", stage: "converting" });
+  try {
+    state.writable = await handle.createWritable();
+  } catch (e) {
+    throw saveError(e);
+  }
+  const writable = state.writable;
+
+  // Planning problems (for example a size limit) are engine errors, not save errors.
+  const summary = JSON.parse(scan.stream_begin(0, read, replacement));
+  const onProgress = makeProgressReporter();
+  for (;;) {
+    const chunk = scan.stream_next();
+    if (!chunk) {
+      break;
+    }
+    chunkBytes = chunk.byteLength;
+    const started = performance.now();
+    try {
+      await writable.write(chunk);
+    } catch (e) {
+      throw saveError(e);
+    }
+    rec.write(chunk.byteLength, performance.now() - started);
+    position += chunk.byteLength;
+    onProgress(scan.stream_fraction());
+  }
+  chunkBytes = 0;
+  postMessage({ type: "progress", fraction: 1 });
+  rec.begin("finalize");
+  postMessage({ type: "stage", stage: "finalizing" });
+  try {
+    await writable.close();
+  } catch (e) {
+    throw saveError(e);
+  }
+  state.writable = null;
+
+  // The file on disk must be exactly what was written; a mismatch is reported, never hidden.
+  let size = null;
+  try {
+    size = (await handle.getFile()).size;
+  } catch {
+    // Reading the size back is a check, not a requirement: some browsers deny it.
+  }
+  if (size !== null && size !== total) {
+    throw saveError({
+      name: "SizeMismatch",
+      message: `the saved file is ${size} bytes but ${total} were written`,
+    });
+  }
+  rec.end();
+
+  if (audioNote) {
+    summary.warnings = [...(summary.warnings ?? []), audioNote];
+  }
+  const diagnostics = buildDiagnostics({
+    version: wasmVersion,
+    env: collectEnv(),
+    file,
+    recorder: rec,
+    storage: state.storage,
+    report: state.report,
+  });
+  postMessage({
+    type: "done",
+    saved: true,
+    savedName: typeof handle.name === "string" ? handle.name : outputName,
+    size: total,
+    summary,
+    outputName,
+    inMemory: false,
+    diagnostics,
+  });
+  self.close();
+}
+
+/** Discards a half-written chosen file (the target is left as it was). Never throws. */
+async function abortQuietly(writable) {
+  if (!writable) {
+    return;
+  }
+  try {
+    await writable.abort();
+  } catch {
+    // Already closed or aborted.
   }
 }
 

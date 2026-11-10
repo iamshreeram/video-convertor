@@ -4,6 +4,7 @@ import {
   Recorder,
   assessStorage,
   buildDiagnostics,
+  classifySaveFailure,
   classifyWriteFailure,
   formatDiagnostics,
   logDiagnostics,
@@ -192,4 +193,47 @@ test("logDiagnostics writes a grouped, copyable record to the console and never 
   logDiagnostics("info", diag, { log: () => {} });
   logDiagnostics("info", diag, null);
   logDiagnostics("info", null, con);
+});
+
+test("a write the browser refuses with an odd return value is OUTPUT_REJECTED, never a success or 'storage full'", () => {
+  // The real failure: Chrome's sync access handle returned 4294967288 (= -8 as unsigned) for a
+  // 1 MiB write at 249 MB of 1.6 GB while 10 GB of quota was free.
+  const f = classifyWriteFailure({ written: 4294967288, expected: 1048576, position: 249000000, total: 1629000000 });
+  assert.equal(f.code, "OUTPUT_REJECTED");
+  assert.equal(
+    f.message,
+    "output rejected: the browser refused a write after 249000000 of 1629000000 bytes (browser code -8)",
+  );
+  // more than was asked for, negative, fractional and NaN results are all refusals too
+  for (const written of [2000, -1, 1.5, NaN, Infinity]) {
+    const r = classifyWriteFailure({ written, expected: 1000, position: 5, total: 50 });
+    assert.equal(r.code, "OUTPUT_REJECTED", `written=${written}`);
+    assert.match(r.message, /^output rejected: /);
+  }
+  // an unknown total still reads well
+  assert.equal(
+    classifyWriteFailure({ written: -8, expected: 1000, position: 7 }).message,
+    "output rejected: the browser refused a write after 7 bytes (browser code -8)",
+  );
+  // a short write is still "storage full"; a thrown error is still its own class
+  assert.equal(classifyWriteFailure({ written: 0, expected: 1000, position: 1 }).code, "STORAGE_FULL");
+  assert.equal(classifyWriteFailure({ name: "InvalidStateError", message: "x", position: 1, total: 2 }).code, "OUTPUT_ERROR");
+});
+
+test("classifySaveFailure explains failures of a file the user chose without guessing", () => {
+  const denied = classifySaveFailure({ name: "NotAllowedError", message: "The request is not allowed", position: 10, total: 20 });
+  assert.equal(denied.code, "SAVE_DENIED");
+  assert.match(denied.message, /^save denied: NotAllowedError: /);
+
+  const full = classifySaveFailure({ name: "QuotaExceededError", message: "q", position: 10, total: 20 });
+  assert.equal(full.code, "STORAGE_FULL");
+  assert.equal(full.message, "storage full: disk write failed after 10 of 20 bytes");
+
+  const other = classifySaveFailure({ name: "NoModificationAllowedError", message: "locked", position: 1, total: 2 });
+  assert.equal(other.code, "SAVE_FAILED");
+  assert.equal(other.message, "save error: NoModificationAllowedError: locked");
+
+  // anything without a name is still described
+  assert.equal(classifySaveFailure({}).code, "SAVE_FAILED");
+  assert.equal(classifySaveFailure({ message: "boom" }).message, "save error: Error: boom");
 });

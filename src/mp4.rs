@@ -5,6 +5,7 @@ use crate::error::{Error, Result};
 use crate::mkv::TrackKind;
 use crate::plan::{Chunk, Plan, PlanTrack};
 use crate::source::{Sink, Source};
+use std::borrow::Borrow;
 
 /// Largest single source read; also the size of the reusable read buffer.
 const SLICE_BYTES: usize = 1 << 20;
@@ -126,69 +127,160 @@ pub fn write_mp4<S: Source, K: Sink>(
     sink: &mut K,
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<u64> {
-    let header = build_header(plan)?;
-    sink.write(&header.bytes)?;
-
-    let total = plan.mdat_payload_size;
-    let mut written_payload: u64 = 0;
-    let mut scratch = zeroed_buffer(SLICE_BYTES)?;
-    let mut staging: Vec<u8> = Vec::new();
-    staging
-        .try_reserve(FLUSH_BYTES + SLICE_BYTES)
-        .map_err(|_| alloc_failed())?;
-
-    for chunk in &plan.chunks {
-        let track = plan
-            .tracks
-            .get(chunk.track)
-            .ok_or_else(|| internal("chunk track index out of range"))?;
-        let end = chunk
-            .first_sample
-            .checked_add(chunk.sample_count)
-            .ok_or_else(|| internal("chunk sample range overflow"))?;
-        let samples = track
-            .samples
-            .get(chunk.first_sample..end)
-            .ok_or_else(|| internal("chunk sample range out of bounds"))?;
-        for sample in samples {
-            let mut offset = sample.offset;
-            let mut left = u64::from(sample.size);
-            while left > 0 {
-                let n = left.min(SLICE_BYTES as u64) as usize;
-                let buf = scratch
-                    .get_mut(..n)
-                    .ok_or_else(|| internal("scratch bounds"))?;
-                src.read_at(offset, buf)?;
-                staging.try_reserve(n).map_err(|_| alloc_failed())?;
-                staging.extend_from_slice(buf);
-                offset = offset
-                    .checked_add(n as u64)
-                    .ok_or_else(|| internal("source offset overflow"))?;
-                left -= n as u64;
-                if staging.len() >= FLUSH_BYTES {
-                    written_payload = written_payload
-                        .checked_add(flush_staging(sink, &mut staging)?)
-                        .ok_or_else(|| internal("payload counter overflow"))?;
-                    progress(written_payload, total);
-                }
-            }
+    let mut stream = Mp4Stream::new(plan)?;
+    let total = stream.payload_total();
+    let mut block: Vec<u8> = Vec::new();
+    let mut header_sent = false;
+    while stream.next_block(src, &mut block)? {
+        sink.write(block.as_slice())?;
+        if header_sent {
+            progress(stream.payload_done(), total);
         }
-    }
-    if !staging.is_empty() {
-        written_payload = written_payload
-            .checked_add(flush_staging(sink, &mut staging)?)
-            .ok_or_else(|| internal("payload counter overflow"))?;
-        progress(written_payload, total);
+        header_sent = true;
     }
     progress(total, total);
+    Ok(stream.total_size())
+}
 
-    let written = (header.bytes.len() as u64)
-        .checked_add(written_payload)
-        .ok_or_else(|| internal("written size overflow"))?;
-    if written != header.total_size {
-        return Err(internal("size mismatch"));
+/// The MP4 as a sequence of blocks that the caller pulls one at a time, so a sink that has to be
+/// awaited (the browser's file-save stream) can sit between two calls. [`write_mp4`] is a loop
+/// over this type, so the pull and push outputs are the same bytes by construction.
+///
+/// The first block is the header (ftyp + moov + mdat box header); the following blocks carry the
+/// sample payloads in chunk order. A payload block is at least [`FLUSH_BYTES`] long except the
+/// last, and shorter than `FLUSH_BYTES + SLICE_BYTES`.
+pub struct Mp4Stream<P: Borrow<Plan>> {
+    plan: P,
+    header: Option<Vec<u8>>,
+    total_size: u64,
+    payload_total: u64,
+    payload_done: u64,
+    /// Next chunk to copy.
+    chunk: usize,
+    /// Next sample inside that chunk.
+    sample: usize,
+    /// Bytes of that sample already copied.
+    sample_done: u64,
+    scratch: Vec<u8>,
+    finished: bool,
+}
+
+impl<P: Borrow<Plan>> Mp4Stream<P> {
+    /// Builds the header (and so checks that the plan can be written). Reads nothing.
+    pub fn new(plan: P) -> Result<Self> {
+        let header = build_header(plan.borrow())?;
+        let payload_total = plan.borrow().mdat_payload_size;
+        Ok(Mp4Stream {
+            plan,
+            total_size: header.total_size,
+            header: Some(header.bytes),
+            payload_total,
+            payload_done: 0,
+            chunk: 0,
+            sample: 0,
+            sample_done: 0,
+            scratch: zeroed_buffer(SLICE_BYTES)?,
+            finished: false,
+        })
     }
-    Ok(header.total_size)
+
+    /// Exact size of the whole MP4.
+    pub fn total_size(&self) -> u64 {
+        self.total_size
+    }
+
+    /// Size of the mdat payload (the part that `payload_done` counts toward).
+    pub fn payload_total(&self) -> u64 {
+        self.payload_total
+    }
+
+    /// True once every block has been handed out.
+    pub fn is_finished(&self) -> bool {
+        self.finished
+    }
+
+    /// Payload bytes handed out so far.
+    pub fn payload_done(&self) -> u64 {
+        self.payload_done
+    }
+
+    /// Replaces the contents of `out` with the next block. Returns `Ok(false)` with `out` empty
+    /// once everything was handed out (and keeps doing so on further calls).
+    pub fn next_block<S: Source>(&mut self, src: &mut S, out: &mut Vec<u8>) -> Result<bool> {
+        out.clear();
+        if let Some(header) = self.header.take() {
+            *out = header;
+            return Ok(true);
+        }
+        if self.finished {
+            return Ok(false);
+        }
+        out.try_reserve(FLUSH_BYTES + SLICE_BYTES)
+            .map_err(|_| alloc_failed())?;
+        let plan = self.plan.borrow();
+        while self.chunk < plan.chunks.len() {
+            let chunk = plan
+                .chunks
+                .get(self.chunk)
+                .ok_or_else(|| internal("chunk index out of range"))?;
+            let track = plan
+                .tracks
+                .get(chunk.track)
+                .ok_or_else(|| internal("chunk track index out of range"))?;
+            let end = chunk
+                .first_sample
+                .checked_add(chunk.sample_count)
+                .ok_or_else(|| internal("chunk sample range overflow"))?;
+            let samples = track
+                .samples
+                .get(chunk.first_sample..end)
+                .ok_or_else(|| internal("chunk sample range out of bounds"))?;
+            while let Some(sample) = samples.get(self.sample) {
+                let size = u64::from(sample.size);
+                while self.sample_done < size {
+                    let n = (size - self.sample_done).min(SLICE_BYTES as u64) as usize;
+                    let offset = sample
+                        .offset
+                        .checked_add(self.sample_done)
+                        .ok_or_else(|| internal("source offset overflow"))?;
+                    let buf = self
+                        .scratch
+                        .get_mut(..n)
+                        .ok_or_else(|| internal("scratch bounds"))?;
+                    src.read_at(offset, buf)?;
+                    out.extend_from_slice(buf);
+                    self.sample_done += n as u64;
+                    self.payload_done = self
+                        .payload_done
+                        .checked_add(n as u64)
+                        .ok_or_else(|| internal("payload counter overflow"))?;
+                    if out.len() >= FLUSH_BYTES {
+                        // The position already points past the bytes just taken, so the next
+                        // call resumes exactly here.
+                        if self.sample_done == size {
+                            self.sample += 1;
+                            self.sample_done = 0;
+                        }
+                        return Ok(true);
+                    }
+                }
+                self.sample += 1;
+                self.sample_done = 0;
+            }
+            self.chunk += 1;
+            self.sample = 0;
+            self.sample_done = 0;
+        }
+        self.finished = true;
+        let written = (self.total_size - self.payload_total)
+            .checked_add(self.payload_done)
+            .ok_or_else(|| internal("written size overflow"))?;
+        if written != self.total_size {
+            return Err(internal("size mismatch"));
+        }
+        // The last, partial block (if any) is returned now; the end is reported next time.
+        Ok(!out.is_empty())
+    }
 }
 
 // ------------------------------------------------------------------ helpers
@@ -221,14 +313,6 @@ fn zeroed_buffer(len: usize) -> Result<Vec<u8>> {
     v.try_reserve_exact(len).map_err(|_| alloc_failed())?;
     v.resize(len, 0);
     Ok(v)
-}
-
-/// Sends the staging buffer to the sink and returns how many bytes were sent.
-fn flush_staging<K: Sink>(sink: &mut K, staging: &mut Vec<u8>) -> Result<u64> {
-    let n = staging.len() as u64;
-    sink.write(staging.as_slice())?;
-    staging.clear();
-    Ok(n)
 }
 
 /// Packs an ISO-639-2 code as three 5-bit letters (`c - 0x60`). Anything other than exactly

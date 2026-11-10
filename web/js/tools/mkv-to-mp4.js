@@ -47,6 +47,31 @@ function workerHooks(params) {
   return null;
 }
 
+/** @param {unknown} name @returns {string} "<name without extension>.mp4" for the save dialog */
+function suggestedMp4Name(name) {
+  const raw = typeof name === "string" ? name : "";
+  const base = raw.replace(/[\\/]/g, "_").replace(/\.[^.]*$/, "");
+  return `${base || "output"}.mp4`;
+}
+
+/**
+ * Removes a file the save dialog created if nothing was written to it (a failed or cancelled
+ * save). A file that already had content is never touched. Best effort; never throws.
+ * @param {any} handle FileSystemFileHandle
+ */
+async function removeIfEmpty(handle) {
+  if (!handle || typeof handle.remove !== "function") return;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      if ((await handle.getFile()).size !== 0) return;
+      await handle.remove();
+      return;
+    } catch {
+      await delay(1500);
+    }
+  }
+}
+
 /**
  * @param {unknown} result
  * @returns {void}
@@ -70,6 +95,8 @@ export async function mount(container, ctx) {
   const parsedBudget = Number(params.get("membudget"));
   const budgetTotal = Number.isFinite(parsedBudget) && parsedBudget > 0 ? parsedBudget : DEFAULT_BUDGET_BYTES;
   const storageOnDisk = Boolean(caps.opfs) && !noFs;
+  // Chrome and Edge on desktop can let the user pick the file the result is written to.
+  const canPickFile = typeof window.showSaveFilePicker === "function";
 
   const budget = createMemoryBudget(budgetTotal);
   let workerStarted = false;
@@ -146,7 +173,7 @@ export async function mount(container, ctx) {
     revokeResult(job.result);
     budget.release(job.id);
     publishStorage();
-    if (job.runId !== undefined && !(job.result && job.result.inMemory)) {
+    if (job.runId !== undefined && !(job.result && (job.result.inMemory || job.result.saved))) {
       scheduleCleanup(job.runId);
     }
   }
@@ -156,7 +183,7 @@ export async function mount(container, ctx) {
     revokeResult(result);
     budget.release(job.id);
     publishStorage();
-    if (result && !result.inMemory) scheduleCleanup(job.runId);
+    if (result && !result.inMemory && !result.saved) scheduleCleanup(job.runId);
   }
 
   /**
@@ -207,6 +234,7 @@ export async function mount(container, ctx) {
         // The stable code comes from the same mapper the card uses, so both always agree.
         if (diag.error) diag.error.code = describeError(message).code;
         logDiagnostics("error", diag);
+        void removeIfEmpty(job.outputHandle);
         jobCtx.update({ errorDetails: details ?? message, diagnostics: diag });
         reject(new Error(message));
       };
@@ -214,6 +242,22 @@ export async function mount(container, ctx) {
       /** @param {{file: Blob, outputName: string, inMemory: boolean}} msg */
       const succeed = (msg) => {
         if (finished) return;
+        if (msg.saved === true) {
+          // Written straight to the file the user chose: no blob, no memory, no private storage.
+          finished = true;
+          stop();
+          logDiagnostics("info", msg.diagnostics);
+          publishStorage();
+          resolve({
+            saved: true,
+            savedName: typeof msg.savedName === "string" ? msg.savedName : msg.outputName,
+            name: msg.outputName,
+            size: Number.isFinite(msg.size) ? msg.size : 0,
+            inMemory: false,
+            runId,
+          });
+          return;
+        }
         const out = msg.file;
         if (!(out instanceof Blob)) {
           fail("The converter returned no file.");
@@ -283,6 +327,7 @@ export async function mount(container, ctx) {
         finished = true;
         stop();
         scheduleCleanup(runId);
+        if (!wasFinished) void removeIfEmpty(job.outputHandle);
         if (!wasFinished) reject(new Error("Cancelled"));
       });
 
@@ -324,6 +369,7 @@ export async function mount(container, ctx) {
             runId,
             inMemory: noFs || !caps.opfs,
             memoryBudgetBytes: budget.remaining(),
+            outputHandle: job.outputHandle,
           });
         },
         (err) => fail(err?.message || "Could not start the conversion worker."),
@@ -337,6 +383,35 @@ export async function mount(container, ctx) {
   /** @param {string} id */
   function handleCancel(id) {
     queue.cancel(Number(id));
+  }
+
+  /**
+   * Opens the browser's save dialog and, once a file is chosen, runs the failed job again with
+   * its output written straight to that file. The dialog needs the click that called this, so it
+   * is the first thing done here.
+   * @param {string} id
+   */
+  function handleSaveToFile(id) {
+    const job = queue.jobs.find((j) => j.id === Number(id));
+    if (!job || job.state !== "error" || typeof window.showSaveFilePicker !== "function") return;
+    window
+      .showSaveFilePicker({
+        suggestedName: suggestedMp4Name(job.file && job.file.name),
+        types: [{ description: "MP4 video", accept: { "video/mp4": [".mp4"] } }],
+      })
+      .then(
+        (handle) => {
+          if (!mounted) return;
+          if (!queue.retry(job.id, { outputHandle: handle })) void removeIfEmpty(handle);
+        },
+        (err) => {
+          // Closing the dialog is not an error.
+          if (err && err.name === "AbortError") return;
+          if (typeof ctx.showToast === "function") {
+            ctx.showToast("Couldn\u2019t open the save dialog. Try again.", { kind: "error" });
+          }
+        },
+      );
   }
 
   /** Removes a card and moves focus to the next card, else to the dropzone. @param {string} id */
@@ -374,7 +449,11 @@ export async function mount(container, ctx) {
       if (cards.has(id)) {
         cards.get(id).update(job);
       } else {
-        const card = createJobCard(job, { onCancel: handleCancel, onRemove: handleRemove });
+        const card = createJobCard(job, {
+          onCancel: handleCancel,
+          onRemove: handleRemove,
+          onSaveToFile: canPickFile ? handleSaveToFile : undefined,
+        });
         cards.set(id, card);
         list.addCard(card.el, id);
       }

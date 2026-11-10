@@ -249,3 +249,131 @@ test("memory budget: reserve/release/can-fit, never negative, idempotent release
   assert.equal(createMemoryBudget(0).canFit(1), false);
   assert.equal(createMemoryBudget(0).canFit(0), true);
 });
+
+test("retry puts a failed job back in the queue with extra fields and runs it again", async () => {
+  const runs = [];
+  const q = createQueue({
+    run: async (job, ctx) => {
+      runs.push({ handle: job.outputHandle ?? null, stale: job.analysis ?? null, progress: job.progress ?? null });
+      ctx.update({ analysis: { n: runs.length }, progress: 0.4, diagnostics: { d: runs.length } });
+      if (!job.outputHandle) throw new Error("storage full: needs more");
+      return { saved: true, name: "x.mp4" };
+    },
+  });
+  const a = q.add(file("a"));
+  await tick();
+  let job = q.jobs.find((j) => j.id === a.id);
+  assert.equal(job.state, "error");
+  assert.equal(job.diagnostics.d, 1);
+
+  assert.equal(q.retry(a.id, { outputHandle: { name: "x.mp4" } }), true);
+  job = q.jobs.find((j) => j.id === a.id);
+  assert.equal(job.state === "queued" || job.state === "analyzing", true);
+  assert.equal(job.error, null);
+  assert.equal(job.result, null);
+  assert.equal(job.diagnostics, undefined, "old diagnostics are cleared");
+  await tick();
+  job = q.jobs.find((j) => j.id === a.id);
+  assert.equal(job.state, "done");
+  assert.deepEqual(job.result, { saved: true, name: "x.mp4" });
+  assert.deepEqual(runs[1], { handle: { name: "x.mp4" }, stale: null, progress: null }, "the retry starts clean");
+  assert.equal(q.jobs.length, 1, "same card, no duplicate job");
+});
+
+test("retry keeps the job's place in the queue and only starts when it is its turn", async () => {
+  const order = [];
+  const gates = {};
+  const q = createQueue({
+    run: async (job) => {
+      order.push(`${job.file.name}${job.outputHandle ? "+h" : ""}`);
+      if (job.file.name === "a" && !job.outputHandle) throw new Error("memory budget exceeded");
+      gates[job.file.name] = deferred();
+      return gates[job.file.name].promise;
+    },
+  });
+  const a = q.add(file("a")), b = q.add(file("b")), c = q.add(file("c"));
+  await tick();
+  assert.deepEqual(order, ["a", "b"]);
+  q.retry(a.id, { outputHandle: {} }); // b is running: a waits, ahead of c
+  await tick();
+  assert.deepEqual(order, ["a", "b"]);
+  gates.b.resolve("B");
+  await tick();
+  assert.deepEqual(order, ["a", "b", "a+h"]);
+  gates["a"].resolve("A");
+  await tick();
+  assert.deepEqual(order, ["a", "b", "a+h", "c"]);
+  assert.deepEqual(q.jobs.map((j) => j.id), [a.id, b.id, c.id]);
+});
+
+test("retry is a no-op unless the job failed", async () => {
+  const g = deferred();
+  const q = createQueue({ run: async () => g.promise });
+  const a = q.add(file("a"));
+  const b = q.add(file("b"));
+  const c = q.add(file("c"));
+  q.cancel(c.id); // a queued job that is cancelled before it runs
+  await tick();
+  assert.equal(q.retry(a.id, { x: 1 }), false, "running");
+  assert.equal(q.retry(b.id, { x: 1 }), false, "queued");
+  assert.equal(q.retry(999, {}), false, "unknown id");
+  g.resolve("ok");
+  await tick();
+  assert.equal(q.retry(a.id, { x: 1 }), false, "done");
+  assert.equal(q.retry(c.id, {}), false, "cancelled");
+  assert.equal(q.jobs.find((j) => j.id === a.id).x, undefined, "nothing was changed");
+});
+
+test("a retried job can be cancelled and settles only once", async () => {
+  const cancels = [];
+  const gates = [];
+  const q = createQueue({
+    run: async (job, ctx) => {
+      ctx.onCancel(() => cancels.push(job.outputHandle ? "retry" : "first"));
+      if (!job.outputHandle) throw new Error("output error: x");
+      const g = deferred();
+      gates.push(g);
+      return g.promise;
+    },
+  });
+  const a = q.add(file("a"));
+  await tick();
+  q.retry(a.id, { outputHandle: {} });
+  await tick();
+  assert.equal(q.jobs[0].state, "analyzing");
+  q.cancel(a.id);
+  assert.equal(q.jobs[0].state, "cancelled");
+  assert.deepEqual(cancels, ["retry"], "only the live run is cancelled");
+  gates[0].resolve({ late: true }); // a result after cancel must not revive the job
+  await tick();
+  assert.equal(q.jobs[0].state, "cancelled");
+  assert.equal(q.jobs[0].result, null);
+});
+
+test("retry cannot overwrite the reserved job fields", async () => {
+  const q = createQueue({ run: async (job) => { if (!job.ok) throw new Error("boom"); return "r"; } });
+  const a = q.add(file("a"));
+  await tick();
+  q.retry(a.id, { ok: true, id: 777, state: "done", result: "forged", error: "forged", file: null });
+  await tick();
+  const job = q.jobs[0];
+  assert.equal(job.id, a.id);
+  assert.equal(job.file.name, "a");
+  assert.equal(job.state, "done");
+  assert.equal(job.result, "r");
+  assert.equal(job.error, null);
+});
+
+test("onRemove is still called once for a retried job that is removed", async () => {
+  const removed = [];
+  const q = createQueue({
+    run: async (job) => { if (!job.outputHandle) throw new Error("boom"); return "r"; },
+    onRemove: (job) => removed.push(job.id),
+  });
+  const a = q.add(file("a"));
+  await tick();
+  q.retry(a.id, { outputHandle: {} });
+  await tick();
+  q.remove(a.id);
+  assert.deepEqual(removed, [a.id]);
+});

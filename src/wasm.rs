@@ -9,7 +9,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::convert::{
     convert_with_replacements, export_track_packets, probe_with_replacements, scan_source,
-    ConvertOptions, ReplacementSample, Scanned, TrackReplacement,
+    ConvertOptions, ConvertStream, ReplacementSample, Scanned, TrackReplacement,
 };
 use crate::error::{Error, Result as CrateResult};
 use crate::json::{probe_to_json, report_to_json};
@@ -175,6 +175,10 @@ pub fn export_audio_track(
 pub struct Scan {
     file_size: u64,
     scanned: Option<Scanned>,
+    /// Set by `stream_begin`: the conversion that `stream_next` pulls blocks from.
+    stream: Option<ConvertStream<JsSource, ExtraSource>>,
+    /// Reused between `stream_next` calls so each block does not allocate again.
+    block: Vec<u8>,
 }
 
 #[wasm_bindgen]
@@ -203,6 +207,8 @@ impl Scan {
         Ok(Scan {
             file_size: len,
             scanned: Some(scanned),
+            stream: None,
+            block: Vec::new(),
         })
     }
 
@@ -293,6 +299,62 @@ impl Scan {
             )
             .map(|r| report_to_json(&r))
             .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Starts a conversion whose output the page pulls with `stream_next`, for sinks that must be
+    /// awaited (a file the user chose). Returns the report JSON (with the exact `outputSize`)
+    /// before any block exists. The scan is used up: later calls fail.
+    pub fn stream_begin(
+        &mut self,
+        max_output_bytes: f64,
+        read: &js_sys::Function,
+        replacement: &JsValue,
+    ) -> Result<String, JsError> {
+        let scanned = self
+            .scanned
+            .take()
+            .ok_or_else(|| JsError::new("the scan was already used"))?;
+        let max_output = if max_output_bytes.is_finite() && max_output_bytes > 0.0 {
+            Some(max_output_bytes as u64)
+        } else {
+            None
+        };
+        let source = JsSource {
+            len: self.file_size,
+            read: read.clone(),
+        };
+        let (replacements, extra) = parse_replacement(replacement)?;
+        let options = ConvertOptions {
+            max_output_bytes: max_output,
+        };
+        let stream = scanned
+            .into_stream(source, extra, &replacements, &options)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        let json = report_to_json(stream.report());
+        self.stream = Some(stream);
+        Ok(json)
+    }
+
+    /// The next block of the MP4 (the first one is the header), or `undefined` when all of it
+    /// was handed out. The page must write each block, in order, before asking for the next.
+    pub fn stream_next(&mut self) -> Result<Option<js_sys::Uint8Array>, JsError> {
+        let stream = self
+            .stream
+            .as_mut()
+            .ok_or_else(|| JsError::new("stream_begin was not called"))?;
+        let more = stream
+            .next_block(&mut self.block)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(if more {
+            Some(js_sys::Uint8Array::from(self.block.as_slice()))
+        } else {
+            None
+        })
+    }
+
+    /// Share of the output handed out by `stream_next` so far, in [0, 1].
+    pub fn stream_fraction(&self) -> f64 {
+        self.stream.as_ref().map_or(0.0, ConvertStream::fraction)
     }
 }
 

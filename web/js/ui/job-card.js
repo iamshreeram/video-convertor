@@ -8,7 +8,7 @@ import { h } from "../core/dom.js";
 import { icon } from "../core/icons.js";
 import { formatBytes, formatDuration, formatEta, formatSpeed } from "../core/format.js";
 import { formatDiagnostics } from "../core/diagnostics.js";
-import { describeError, describeWarning } from "../core/errors.js";
+import { describeError, describeWarning, offersSaveToFile } from "../core/errors.js";
 
 /** Display metadata per visible state. */
 const STATE_INFO = {
@@ -148,10 +148,12 @@ function safeUrl(url) {
 
 /**
  * @param {object} job
- * @param {{onCancel?: (id: string) => void, onRemove?: (id: string) => void}} handlers
+ * @param {{onCancel?: (id: string) => void, onRemove?: (id: string) => void,
+ *   onSaveToFile?: (id: string) => void}} handlers `onSaveToFile` is only passed when the browser
+ *   can let the user pick a file; a failed job whose error it can get around then shows a button.
  * @returns {{el: HTMLElement, update: (job: object) => void, focusPrimary: () => void, destroy: () => void}}
  */
-export function createJobCard(job, { onCancel, onRemove } = {}) {
+export function createJobCard(job, { onCancel, onRemove, onSaveToFile } = {}) {
   let currentId = job && job.id !== undefined ? String(job.id) : "";
   let base = "queued";
   let previewOpen = false;
@@ -166,6 +168,8 @@ export function createJobCard(job, { onCancel, onRemove } = {}) {
   let errorKey = "";
   let lastUrl = "";
   let currentName = "";
+  let currentCode = "";
+  let savedName = "";
 
   // ---- static skeleton --------------------------------------------------
   const nameEl = h("span", { class: "job__name", dataset: { testid: "job-name" } });
@@ -268,6 +272,15 @@ export function createJobCard(job, { onCancel, onRemove } = {}) {
   // Preview: the <video> exists only while the preview is open.
   const previewWrap = h("div", { class: "job__preview" });
 
+  // Shown instead of Download when the converted file was written straight to a file the user chose.
+  const savedNameEl = h("strong", { dataset: { testid: "job-saved-name" } });
+  const savedEl = h(
+    "p",
+    { class: "job__saved", dataset: { testid: "job-saved-note" } },
+    icon("check", { size: 16 }),
+    h("span", {}, "Saved to disk as ", savedNameEl, "."),
+  );
+
   const extrasEl = h("div", { class: "job__extras" });
   const actionsEl = h("div", { class: "job__actions" });
 
@@ -342,7 +355,8 @@ export function createJobCard(job, { onCancel, onRemove } = {}) {
    * @param {string|null} url
    */
   function renderActions(name, url) {
-    const key = `${base}|${name}|${url || ""}`;
+    const offerSave = base === "error" && typeof onSaveToFile === "function" && offersSaveToFile(currentCode);
+    const key = `${base}|${name}|${url || ""}|${offerSave ? "save" : ""}`;
     if (key === actionsKey) return;
     actionsKey = key;
     previewToggle = null;
@@ -364,7 +378,7 @@ export function createJobCard(job, { onCancel, onRemove } = {}) {
         ),
       );
     }
-    if (base === "done") {
+    if (base === "done" && url) {
       previewLabel = h("span", {}, previewOpen ? "Hide preview" : "Preview");
       previewToggle = h(
         "button",
@@ -378,6 +392,26 @@ export function createJobCard(job, { onCancel, onRemove } = {}) {
         previewLabel,
       );
       buttons.push(previewToggle);
+    }
+    if (offerSave) {
+      const outName = `${stem(name)}.mp4`;
+      buttons.push(
+        h(
+          "button",
+          {
+            class: "btn btn--primary btn--sm",
+            dataset: { testid: "job-save-to-file" },
+            attrs: { type: "button", "aria-label": `Save ${outName} to a file you choose` },
+            on: {
+              click: () => {
+                onSaveToFile(currentId);
+              },
+            },
+          },
+          icon("download", { size: 16 }),
+          "Save to a file\u2026",
+        ),
+      );
     }
     if (base === "queued" || base === "analyzing" || base === "converting") {
       buttons.push(
@@ -423,6 +457,7 @@ export function createJobCard(job, { onCancel, onRemove } = {}) {
   function syncExtras() {
     const wanted = [];
     if (warnList.childElementCount > 0) wanted.push(warningsEl);
+    if (base === "done" && savedName) wanted.push(savedEl);
     if (base === "error") wanted.push(errorEl);
     if (previewOpen) wanted.push(previewWrap);
     syncChildren(extrasEl, wanted);
@@ -509,6 +544,8 @@ export function createJobCard(job, { onCancel, onRemove } = {}) {
     const analysis = job.analysis && typeof job.analysis === "object" ? job.analysis : null;
     const result = job.result && typeof job.result === "object" ? job.result : null;
     const url = result ? safeUrl(result.url) : null;
+    savedName = result && result.saved === true && typeof result.savedName === "string" ? result.savedName : "";
+    if (savedName) setText(savedNameEl, savedName);
 
     setAttr(el, "data-state", base);
     setAttr(el, "data-name", name);
@@ -592,6 +629,7 @@ export function createJobCard(job, { onCancel, onRemove } = {}) {
     // Error panel.
     if (base === "error") {
       const described = describeError(job.error);
+      currentCode = described.code;
       currentDiagnostics = job.diagnostics && typeof job.diagnostics === "object" ? job.diagnostics : null;
       const key = `${described.title}|${described.hint}|${described.details}|${described.code}`;
       if (key !== errorKey) {
@@ -614,6 +652,7 @@ export function createJobCard(job, { onCancel, onRemove } = {}) {
   /** Moves focus to the most relevant action: Download, Cancel or Remove. */
   function focusPrimary() {
     const order = base === "done" ? ["job-download", "job-remove"]
+      : base === "error" ? ["job-save-to-file", "job-remove"]
       : base === "queued" || base === "analyzing" || base === "converting" ? ["job-cancel"]
         : ["job-remove"];
     for (const testid of order) {
