@@ -1711,6 +1711,149 @@ async function testT23(env) {
   return "20 MB zero tail ignored with notice; output identical to the clean file";
 }
 
+// ---------- T24-T26: more real samples for the Vorbis path ----------
+
+// Creates (once) a generated sample with ffmpeg; returns its path.
+async function ensureSample(name, args) {
+  const file = path.join(FIXTURES, `${name}.mkv`);
+  if (!fs.existsSync(file)) {
+    try {
+      await execFileAsync(FFMPEG, ["-v", "error", "-y", ...args, file], { timeout: 1500000 });
+    } catch (err) {
+      fs.rmSync(file, { force: true });
+      throw err;
+    }
+  }
+  return file;
+}
+
+// Times a track's start/end relative to the video; returns gaps in seconds.
+async function avGaps(file) {
+  const { stdout } = await execFileAsync(FFPROBE, [
+    "-v", "error", "-show_entries", "stream=codec_type,start_time,duration", "-of", "json", file,
+  ]);
+  const t = Object.fromEntries(JSON.parse(stdout).streams.map((x) => [x.codec_type, x]));
+  const start = (x) => Number(x.start_time);
+  const end = (x) => Number(x.start_time) + Number(x.duration);
+  return { startGap: Math.abs(start(t.audio) - start(t.video)), endGap: Math.abs(end(t.audio) - end(t.video)) };
+}
+
+// Runs the Vorbis -> Opus path in real Chrome. Normal runs always pick AAC, so Opus would
+// otherwise never be exercised: this drives the same modules on the page with Opus forced.
+async function testT24(env) {
+  const src = fixture("h264_vorbis");
+  if (!fs.existsSync(src)) {
+    skip("no h264_vorbis.mkv fixture");
+  }
+  const page = await openApp(env, { url: shared.root });
+  const bytes = [...fs.readFileSync(src)];
+  const result = await page.evaluate(async (input) => {
+    const wasm = await import(`${location.origin}/pkg/mkv2mp4.js`);
+    await wasm.default();
+    const audio = await import(`${location.origin}/js/core/audio-transcode.js`);
+    const data = new Uint8Array(input);
+    const read = (offset, length) => data.slice(offset, offset + length);
+    const report = JSON.parse(wasm.probe_mkv(data.length, read));
+    const track = report.reencodable[0];
+    const packets = [];
+    const info = wasm.export_audio_track(data.length, read, track.number, (ptsNs, d) => packets.push({ ptsNs, data: d }));
+    const format = { codecPrivate: info.codecPrivate, sampleRate: info.sampleRate, channels: info.channels };
+    const config = { codec: "opus", sampleRate: format.sampleRate, numberOfChannels: format.channels, bitrate: 128000 };
+    const supported = await AudioEncoder.isConfigSupported(config);
+    if (!supported.supported) return { unsupported: true };
+    const deps = { AudioDecoder, AudioEncoder, EncodedAudioChunk };
+    const encoded = await audio.transcodeVorbis({
+      info: format, packets, encoder: { id: "opus", codecId: "A_OPUS", config }, deps,
+    });
+    const replacement = audio.buildReplacement(track.number, encoded);
+    const chunks = [];
+    const summary = JSON.parse(
+      wasm.convert_mkv_to_mp4_ex(data.length, 0, read, (c) => chunks.push(c.slice()), () => {}, replacement),
+    );
+    const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
+    let at = 0;
+    for (const c of chunks) { out.set(c, at); at += c.length; }
+    return { mp4: [...out], codecPrivateLen: encoded.codecPrivate.length, delayNs: encoded.codecDelayNs, summary };
+  }, bytes);
+  if (result.unsupported) {
+    skip("this Chrome has no Opus AudioEncoder");
+  }
+  const dest = path.join(WORK, "t24-opus.mp4");
+  fs.writeFileSync(dest, Buffer.from(result.mp4));
+  const out = await probeFull(dest);
+  const audio = out.streams.find((x) => x.type === "audio");
+  assert(audio && audio.codec === "opus" && audio.channels === 2, `audio: ${JSON.stringify(out.streams)}`);
+  const dec = await ffmpegDecode(dest, null);
+  assert(dec.code === 0 && dec.lines.length === 0, `decode: ${dec.lines.slice(0, 2).join(" / ")}`);
+  const gaps = await avGaps(dest);
+  assert(gaps.startGap < 0.1, `audio starts ${gaps.startGap.toFixed(3)} s from video`);
+  assert(gaps.endGap < 0.2, `audio ends ${gaps.endGap.toFixed(3)} s from video`);
+  const vol = await meanVolumeDb(dest);
+  const srcVol = await meanVolumeDb(src);
+  assert(vol !== null && Math.abs(vol - srcVol) < 3, `loudness ${vol} dB vs source ${srcVol} dB`);
+  return `opus 2ch, OpusHead ${result.codecPrivateLen} B, delay ${result.delayNs} ns, A/V gaps ${gaps.startGap.toFixed(3)}/${gaps.endGap.toFixed(3)} s, ${vol} dB vs ${srcVol} dB`;
+}
+
+// 5.1 Vorbis: the browser may or may not encode 6 channels. Either outcome is acceptable, but the
+// job must finish with the video, and any audio that is produced must decode and keep 6 channels.
+async function testT25(env) {
+  const src = await ensureSample("h264_vorbis_51", [
+    "-f", "lavfi", "-i", "testsrc=duration=3:size=320x240:rate=24",
+    "-f", "lavfi", "-i", "sine=frequency=440:duration=3:sample_rate=48000",
+    "-af", "pan=5.1|FL=c0|FR=c0|FC=c0|LFE=c0|BL=c0|BR=c0",
+    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "24", "-c:a", "libvorbis", "-b:a", "256k",
+  ]);
+  const page = await openApp(env, { url: shared.root });
+  const { pick, state } = await convertOne(page, src);
+  await expectDone(page, pick, state);
+  const warnings = await cardText(page, pick, testid("job-warnings"));
+  const dest = path.join(WORK, "t25-51.mp4");
+  await downloadFrom(page, pick, dest);
+  const out = await probeFull(dest);
+  assert(out.streams.some((x) => x.type === "video" && x.codec === "h264"), "video missing");
+  const dec = await ffmpegDecode(dest, null);
+  assert(dec.code === 0 && dec.lines.length === 0, `decode: ${dec.lines.slice(0, 2).join(" / ")}`);
+  const audio = out.streams.find((x) => x.type === "audio");
+  if (audio) {
+    assert(audio.channels === 6, `re-encoded audio has ${audio.channels} channels`);
+    assert(/re-encoded/.test(warnings), `audio present but no notice: "${warnings}"`);
+    return `5.1 re-encoded to ${audio.codec} with 6 channels`;
+  }
+  assert(/skipped/i.test(warnings), `no audio and no skip warning: "${warnings}"`);
+  return `5.1 not re-encodable here; video kept, warning: ${warnings.slice(0, 80)}`;
+}
+
+// Realistic long file: 10 min 720p H.264 with B-frames, Vorbis audio, and 100 MB of zero padding.
+async function testT26(env) {
+  const base = await ensureSample("h264_vorbis_long", [
+    "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=25",
+    "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100",
+    "-t", "600", "-c:v", "libx264", "-preset", "ultrafast", "-b:v", "3M", "-bf", "2",
+    "-c:a", "libvorbis", "-b:a", "128k",
+  ]);
+  const padded = path.join(WORK, "t26-padded.mkv");
+  fs.copyFileSync(base, padded);
+  fs.appendFileSync(padded, Buffer.alloc(100 * 1024 * 1024));
+  const page = await openApp(env, { url: shared.root });
+  const started = Date.now();
+  const { pick, state } = await convertOne(page, padded, 600000);
+  const seconds = (Date.now() - started) / 1000;
+  await expectDone(page, pick, state);
+  const warnings = await cardText(page, pick, testid("job-warnings"));
+  assert(/re-encoded to (AAC|Opus)/.test(warnings), `no re-encode notice: "${warnings}"`);
+  assert(/unreadable/.test(warnings), `no notice for the ignored tail: "${warnings}"`);
+  const dest = path.join(WORK, "t26.mp4");
+  await downloadFrom(page, pick, dest, 120000);
+  const out = await probeFull(dest);
+  assert(Math.abs(out.duration - 600) < 1, `duration ${out.duration}`);
+  const dec = await ffmpegDecode(dest, null);
+  assert(dec.code === 0 && dec.lines.length === 0, `decode: ${dec.lines.slice(0, 2).join(" / ")}`);
+  const gaps = await avGaps(dest);
+  assert(gaps.startGap < 0.1, `audio starts ${gaps.startGap.toFixed(3)} s from video`);
+  assert(gaps.endGap < 0.3, `audio ends ${gaps.endGap.toFixed(3)} s from video (drift over 10 min?)`);
+  return `10 min 720p+Vorbis+100 MB tail converted in ${seconds.toFixed(1)} s; duration ${out.duration.toFixed(2)} s; A/V gaps ${gaps.startGap.toFixed(3)}/${gaps.endGap.toFixed(3)} s`;
+}
+
 const TESTS = [
   { id: "T1", title: "OPFS convert h264_aac at /video-convertor/ (chips, download, ffprobe, preview)", timeoutMs: 300000, run: testT1 },
   { id: "T2", title: "in-memory sink (?nofs=1) gives the same bytes, no OPFS files", timeoutMs: 300000, run: testT2 },
@@ -1736,6 +1879,9 @@ const TESTS = [
   { id: "T21", title: "keyboard a11y: Tab order, focus after removal, accessible names, progress semantics", timeoutMs: 300000, run: testT21 },
   { id: "T22", title: "Vorbis audio is re-encoded to AAC/Opus with WebCodecs (valid MP4, same duration and loudness)", timeoutMs: 300000, run: testT22 },
   { id: "T23", title: "zero-padded MKV converts, with a notice, to the identical MP4", timeoutMs: 300000, run: testT23 },
+  { id: "T24", title: "Vorbis -> Opus path in real Chrome (forced): valid MP4, sync, loudness", timeoutMs: 300000, run: testT24 },
+  { id: "T25", title: "5.1 Vorbis: job finishes with video; audio either re-encoded with 6 channels or skipped with a warning", timeoutMs: 300000, run: testT25 },
+  { id: "T26", title: "10 min 720p B-frames + Vorbis + 100 MB zero tail: converts, no A/V drift", big: true, timeoutMs: 1800000, run: testT26 },
 ];
 
 // ---------- main ----------
