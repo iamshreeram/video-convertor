@@ -58,3 +58,60 @@ test("describeWarning rewrites known engine warnings and passes unknown ones thr
   assert.equal(describeWarning("additional segments ignored"), "additional segments ignored");
   assert.equal(describeWarning(""), "");
 });
+
+test("storage errors explain how much space is needed and what to do", () => {
+  const pre = describeError(
+    "storage full: the converted file needs 1500000000 bytes but only 600000000 bytes are available (quota 900000000, used 300000000)",
+  );
+  assert.equal(pre.title, "Not enough storage space for the converted file");
+  assert.equal(pre.code, "STORAGE_FULL");
+  assert.match(pre.hint, /1\.4 GB/);
+  assert.match(pre.hint, /572 MB/);
+  assert.match(pre.hint, /Free up/);
+  assert.match(pre.hint, /Downloads/);
+
+  const mid = describeError("storage full: disk write failed after 1073741824 of 1500000000 bytes");
+  assert.equal(mid.title, "The disk ran out of space while saving");
+  assert.equal(mid.code, "STORAGE_FULL");
+  assert.match(mid.hint, /1\.0 GB of 1\.4 GB/);
+
+  const bare = describeError("storage full: disk write failed after 12 bytes");
+  assert.equal(bare.code, "STORAGE_FULL");
+  assert.ok(bare.hint.length > 20);
+});
+
+test("the older 'output error' wording still maps to the generic save failure", () => {
+  const d = describeError("output error: NoModificationAllowedError: locked");
+  assert.equal(d.title, "Couldn’t save the converted file");
+  assert.equal(d.code, "OUTPUT_ERROR");
+});
+
+test("read failures name the offset and suggest copying the file locally", () => {
+  const d = describeError("I/O error: read failed at offset 123456789 (NotReadableError: The requested file could not be read)");
+  assert.equal(d.title, "Couldn’t read the file");
+  assert.equal(d.code, "READ_FAILED");
+  assert.match(d.hint, /123456789/);
+  assert.match(d.hint, /local/i);
+  assert.equal(describeError("I/O error: short read").code, "READ_FAILED");
+});
+
+test("a stopped worker is explained as a likely out-of-memory crash", () => {
+  const d = describeError("The conversion worker stopped unexpectedly.");
+  assert.equal(d.title, "The converter stopped unexpectedly");
+  assert.equal(d.code, "WORKER_STOPPED");
+  assert.match(d.hint, /memory/i);
+});
+
+test("every described error carries a stable code", () => {
+  const cases = {
+    "invalid Matroska file: not a Matroska/WebM file": "NOT_MKV",
+    "invalid Matroska file: x; no media data could be found": "MKV_DAMAGED",
+    "unsupported: no supported track: V_VP9": "NO_SUPPORTED_TRACK",
+    "too large: x": "TOO_LARGE",
+    "memory budget exceeded: x": "MEMORY_BUDGET",
+    "something nobody anticipated": "UNKNOWN",
+  };
+  for (const [msg, code] of Object.entries(cases)) {
+    assert.equal(describeError(msg).code, code, msg);
+  }
+});

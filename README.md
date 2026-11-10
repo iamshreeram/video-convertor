@@ -33,8 +33,8 @@ Site: <https://iamshreeram.github.io/video-convertor/>
 
 | Kind  | Supported (copied into MP4)                                                                 | Skipped with a warning                                                                 | Not supported                              |
 |-------|---------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------|--------------------------------------------|
-| Video | H.264 (`avc1`), H.265/HEVC (`hvc1` when the parameter sets live only in the config, otherwise `hev1`), AV1 (`av01`) | VP8, VP9 video | Laced blocks, content-encoded (compressed or encrypted) tracks |
-| Audio | AAC (`mp4a`), MP3 (`mp4a`), Opus (`Opus`), FLAC (`fLaC`), AC-3 (`ac-3`)                     | E-AC-3, DTS, TrueHD, PCM                                                               | Laced blocks, content-encoded tracks       |
+| Video | H.264 (`avc1`), H.265/HEVC (`hvc1` when the parameter sets live only in the config, otherwise `hev1`), AV1 (`av01`) | VP8, VP9 video | Laced video blocks, content-encoded (compressed or encrypted) tracks |
+| Audio | AAC (`mp4a`), MP3 (`mp4a`), Opus (`Opus`), FLAC (`fLaC`), AC-3 (`ac-3`); laced blocks (Xiph, EBML, fixed-size lacing) | E-AC-3, DTS, TrueHD, PCM                                                               | Content-encoded tracks; laced blocks whose frame length cannot be determined |
 | Other | none                                                                                        | Subtitles, attachments, chapters                                                       | none                                       |
 
 A file with no supported track fails with an error that lists what was found.

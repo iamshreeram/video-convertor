@@ -56,14 +56,34 @@ pub fn convert_with_replacements<S: Source, E: Source, K: Sink>(
     };
     reporter.report(0.0);
 
+    let analysis = analyze(&mut combined, replacements, &mut |pos, len| {
+        reporter.report(scan_fraction(pos, len))
+    })?;
+    write_and_report(
+        analysis,
+        &mut combined,
+        sink,
+        opts,
+        &mut reporter,
+        SCAN_SHARE,
+    )
+}
+
+/// Size check, then the write phase. `base` is the progress already used by earlier phases.
+fn write_and_report<A: Source, B: Source, K: Sink>(
+    analysis: Analysis,
+    combined: &mut ConcatSource<A, B>,
+    sink: &mut K,
+    opts: &ConvertOptions,
+    reporter: &mut Progress<'_>,
+    base: f64,
+) -> Result<ConvertReport> {
     let Analysis {
         mkv,
         plan,
         total_size,
         ..
-    } = analyze(&mut combined, replacements, &mut |pos, len| {
-        reporter.report(scan_fraction(pos, len))
-    })?;
+    } = analysis;
 
     // Exact size check before anything reaches the sink. (The header is rebuilt inside
     // write_mp4; only its size is kept, so the two copies never coexist.)
@@ -76,9 +96,9 @@ pub fn convert_with_replacements<S: Source, E: Source, K: Sink>(
     }
 
     // Write phase: slice reads are at most 1 MiB; the 4 MiB window absorbs the A/V interleave.
-    let mut write_src = BufferedSource::new(&mut combined, READ_WINDOW_BYTES);
+    let mut write_src = BufferedSource::new(&mut *combined, READ_WINDOW_BYTES);
     let output_size = write_mp4(&plan, &mut write_src, sink, &mut |done, total| {
-        reporter.report(write_fraction(done, total))
+        reporter.report(write_fraction(done, total, base));
     })?;
     reporter.report(1.0);
 
@@ -134,6 +154,15 @@ pub fn export_track_packets<S: Source>(
     sink: &mut dyn FnMut(i64, &[u8]) -> Result<()>,
 ) -> Result<TrackExport> {
     let mkv = scan(&mut src, &mut |_, _| {})?;
+    export_from_mkv(&mkv, src, track_number, sink)
+}
+
+fn export_from_mkv<S: Source>(
+    mkv: &Mkv,
+    mut src: S,
+    track_number: u64,
+    sink: &mut dyn FnMut(i64, &[u8]) -> Result<()>,
+) -> Result<TrackExport> {
     let track = mkv
         .tracks
         .iter()
@@ -297,8 +326,18 @@ fn analyze<A: Source, B: Source>(
     scan_progress: &mut dyn FnMut(u64, u64),
 ) -> Result<Analysis> {
     // scan wraps the source in its own adaptive window; no extra layer here.
-    let mut mkv = scan(src.primary_mut(), scan_progress)?;
+    let mkv = scan(src.primary_mut(), scan_progress)?;
     let file_len = src.primary_len();
+    analyze_scanned(mkv, file_len, src, replacements)
+}
+
+/// The plan phase on an already scanned file (so the scan pass is not repeated).
+fn analyze_scanned<A: Source, B: Source>(
+    mut mkv: Mkv,
+    file_len: u64,
+    src: &mut ConcatSource<A, B>,
+    replacements: &[TrackReplacement],
+) -> Result<Analysis> {
     let extra_len = src.len() - file_len;
     apply_replacements(&mut mkv, file_len, extra_len, replacements)?;
     let reencodable = reencodable_tracks(&mkv);
@@ -361,12 +400,17 @@ pub fn probe_with_replacements<S: Source, E: Source>(
     replacements: &[TrackReplacement],
 ) -> Result<ProbeReport> {
     let mut combined = ConcatSource::new(src, extra);
+    let analysis = analyze(&mut combined, replacements, &mut |_, _| {})?;
+    Ok(probe_report(analysis))
+}
+
+fn probe_report(analysis: Analysis) -> ProbeReport {
     let Analysis {
         mkv,
         plan,
         total_size,
         reencodable,
-    } = analyze(&mut combined, replacements, &mut |_, _| {})?;
+    } = analysis;
     let tracks = plan
         .tracks
         .iter()
@@ -383,13 +427,74 @@ pub fn probe_with_replacements<S: Source, E: Source>(
         .collect();
     let mut warnings = mkv.warnings;
     warnings.extend(plan.warnings.iter().cloned());
-    Ok(ProbeReport {
+    ProbeReport {
         tracks,
         duration_ms: plan.duration,
         output_size: total_size,
         warnings,
         reencodable,
-    })
+    }
+}
+
+/// The result of the scan pass, kept so that probing, exporting audio packets and converting do
+/// not each read the whole file again (a full scan reads every byte of the input).
+pub struct Scanned {
+    mkv: Mkv,
+    file_len: u64,
+}
+
+/// Runs the scan pass on `src`. `progress(position, length)` reports bytes scanned.
+pub fn scan_source<S: Source>(mut src: S, progress: &mut dyn FnMut(u64, u64)) -> Result<Scanned> {
+    let file_len = src.len();
+    let mkv = scan(&mut src, progress)?;
+    Ok(Scanned { mkv, file_len })
+}
+
+impl Scanned {
+    /// Same as [`probe_with_replacements`], without scanning again. `src` must be the file that
+    /// was scanned.
+    pub fn probe<S: Source, E: Source>(
+        &self,
+        src: S,
+        extra: E,
+        replacements: &[TrackReplacement],
+    ) -> Result<ProbeReport> {
+        let mut combined = ConcatSource::new(src, extra);
+        let analysis =
+            analyze_scanned(self.mkv.clone(), self.file_len, &mut combined, replacements)?;
+        Ok(probe_report(analysis))
+    }
+
+    /// Same as [`export_track_packets`], without scanning again.
+    pub fn export_track_packets<S: Source>(
+        &self,
+        src: S,
+        track_number: u64,
+        sink: &mut dyn FnMut(i64, &[u8]) -> Result<()>,
+    ) -> Result<TrackExport> {
+        export_from_mkv(&self.mkv, src, track_number, sink)
+    }
+
+    /// Same as [`convert_with_replacements`], without scanning again. `progress` covers only the
+    /// planning and writing phases (0..=1), because scanning already happened.
+    pub fn convert<S: Source, E: Source, K: Sink>(
+        self,
+        src: S,
+        extra: E,
+        replacements: &[TrackReplacement],
+        sink: &mut K,
+        opts: &ConvertOptions,
+        progress: &mut dyn FnMut(f64),
+    ) -> Result<ConvertReport> {
+        let mut combined = ConcatSource::new(src, extra);
+        let mut reporter = Progress {
+            last: f64::NEG_INFINITY,
+            inner: progress,
+        };
+        reporter.report(0.0);
+        let analysis = analyze_scanned(self.mkv, self.file_len, &mut combined, replacements)?;
+        write_and_report(analysis, &mut combined, sink, opts, &mut reporter, 0.0)
+    }
 }
 
 /// Forwards progress to the caller. Values are clamped to [0, 1] and any value that is not
@@ -420,11 +525,11 @@ fn scan_fraction(pos: u64, len: u64) -> f64 {
     }
 }
 
-fn write_fraction(done: u64, total: u64) -> f64 {
+fn write_fraction(done: u64, total: u64, base: f64) -> f64 {
     if total == 0 {
-        SCAN_SHARE
+        base
     } else {
-        SCAN_SHARE + (1.0 - SCAN_SHARE) * (done as f64 / total as f64)
+        base + (1.0 - base) * (done as f64 / total as f64)
     }
 }
 
@@ -482,8 +587,8 @@ mod tests {
     fn phase_fractions_map_into_their_ranges() {
         assert_eq!(scan_fraction(0, 0), SCAN_SHARE);
         assert_eq!(scan_fraction(5, 10), 0.15);
-        assert_eq!(write_fraction(0, 0), SCAN_SHARE);
-        assert!(write_fraction(10, 10) >= 0.999_999);
-        assert_eq!(write_fraction(0, 10), SCAN_SHARE);
+        assert_eq!(write_fraction(0, 0, SCAN_SHARE), SCAN_SHARE);
+        assert!(write_fraction(10, 10, SCAN_SHARE) >= 0.999_999);
+        assert_eq!(write_fraction(0, 10, SCAN_SHARE), SCAN_SHARE);
     }
 }

@@ -7,6 +7,7 @@
 import { h } from "../core/dom.js";
 import { icon } from "../core/icons.js";
 import { formatBytes, formatDuration, formatEta, formatSpeed } from "../core/format.js";
+import { formatDiagnostics } from "../core/diagnostics.js";
 import { describeError, describeWarning } from "../core/errors.js";
 
 /** Display metadata per visible state. */
@@ -204,9 +205,34 @@ export function createJobCard(job, { onCancel, onRemove } = {}) {
     warnList,
   );
 
-  // Error panel: friendly text plus collapsible technical details.
+  // Error panel: what happened, what to do, a support code with a copy-diagnostics action, and
+  // the raw engine text collapsed underneath.
   const errorTitle = h("p", { class: "job__error-title" });
   const errorHint = h("p", { class: "job__error-hint" });
+  const errorCodeValue = h("code", { dataset: { testid: "job-error-code" } });
+  const copyLabel = h("span", {}, "Copy diagnostics");
+  const copyStatus = h("span", {
+    class: "job__error-copied",
+    attrs: { role: "status" },
+    dataset: { testid: "job-copy-status" },
+  });
+  const copyButton = h(
+    "button",
+    {
+      class: "btn btn--secondary btn--sm",
+      dataset: { testid: "job-copy-diagnostics" },
+      attrs: { type: "button" },
+      on: { click: () => void copyDiagnostics() },
+    },
+    copyLabel,
+  );
+  const errorFoot = h(
+    "div",
+    { class: "job__error-foot" },
+    h("span", { class: "job__error-ref" }, "Error code ", errorCodeValue),
+    copyButton,
+    copyStatus,
+  );
   const errorRaw = h("code", {});
   const errorDetails = h(
     "details",
@@ -217,10 +243,27 @@ export function createJobCard(job, { onCancel, onRemove } = {}) {
   const errorEl = h(
     "div",
     { class: "job__error", dataset: { testid: "job-error" } },
-    errorTitle,
+    h("div", { class: "job__error-head" }, icon("alert", { size: 18 }), errorTitle),
     errorHint,
+    errorFoot,
     errorDetails,
   );
+  let currentDiagnostics = null;
+  let copyTimer = null;
+
+  /** Copies the diagnostics record (no file name or contents) to the clipboard. */
+  async function copyDiagnostics() {
+    if (!currentDiagnostics) return;
+    let message = "Copied to clipboard";
+    try {
+      await navigator.clipboard.writeText(formatDiagnostics(currentDiagnostics));
+    } catch {
+      message = "Could not copy; the same details are in the browser console";
+    }
+    setText(copyStatus, message);
+    if (copyTimer) clearTimeout(copyTimer);
+    copyTimer = setTimeout(() => setText(copyStatus, ""), 4000);
+  }
 
   // Preview: the <video> exists only while the preview is open.
   const previewWrap = h("div", { class: "job__preview" });
@@ -480,7 +523,11 @@ export function createJobCard(job, { onCancel, onRemove } = {}) {
       chip.className = chipClass(info.tone);
       chip.replaceChildren(icon(info.iconName, { size: 14 }), document.createTextNode(info.label));
     }
-    setText(stageEl, info.stage);
+    let stageText = info.stage;
+    if (base === "analyzing" && displayState(job) === "analyzing" && isNum(job.scanProgress) && job.scanProgress >= 0.01) {
+      stageText = `${info.stage.replace(/\u2026$/, "")} \u2014 ${Math.round(Math.min(1, job.scanProgress) * 100)}%`;
+    }
+    setText(stageEl, stageText);
 
     // Preview is only valid for the same finished file.
     if (previewOpen && (base !== "done" || url !== previewUrl)) closePreview();
@@ -545,14 +592,18 @@ export function createJobCard(job, { onCancel, onRemove } = {}) {
     // Error panel.
     if (base === "error") {
       const described = describeError(job.error);
-      const key = `${described.title}|${described.hint}|${described.details}`;
+      currentDiagnostics = job.diagnostics && typeof job.diagnostics === "object" ? job.diagnostics : null;
+      const key = `${described.title}|${described.hint}|${described.details}|${described.code}`;
       if (key !== errorKey) {
         errorKey = key;
         setText(errorTitle, described.title);
         setText(errorHint, described.hint);
+        setText(errorCodeValue, described.code);
         setText(errorRaw, described.details);
         setHidden(errorDetails, !described.details);
       }
+      setHidden(copyButton, !currentDiagnostics);
+      setAttr(copyButton, "aria-label", `Copy diagnostics for ${currentName}`);
     }
 
     renderActions(name, url);

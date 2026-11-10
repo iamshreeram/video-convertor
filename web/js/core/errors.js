@@ -1,9 +1,13 @@
 /**
  * Maps engine error/warning messages to plain-language text (DESIGN.md B3.4).
- * The original message is always kept in `details`. Pure; no DOM access.
+ * The original message is always kept in `details`; `code` is a stable identifier support can
+ * ask for. Pure; no DOM access.
  */
 
+import { formatBytes } from "./format.js";
+
 const DEFAULT_TITLE = "Conversion failed";
+const DEFAULT_CODE = "UNKNOWN";
 const DEFAULT_HINT =
   "Something went wrong while converting this file. Try another file, or reload the page and try again.";
 
@@ -13,6 +17,7 @@ const RULES = [
     // Valid MKV header but no readable media (zeros/garbage where data should be).
     prefix: "invalid Matroska file",
     contains: "no media data could be found",
+    code: "MKV_DAMAGED",
     title: "This MKV file looks damaged",
     hint: "",
     hintFor: (details) => {
@@ -27,11 +32,13 @@ const RULES = [
   },
   {
     prefix: "invalid Matroska file",
+    code: "NOT_MKV",
     title: "This doesn\u2019t look like an MKV or WebM file",
     hint: "Choose an MKV or WebM file. Files renamed from another format will not convert.",
   },
   {
     prefix: "unsupported: no supported track",
+    code: "NO_SUPPORTED_TRACK",
     title: "No supported video or audio found",
     hint: "",
     hintFor: (details) => {
@@ -46,21 +53,83 @@ const RULES = [
   },
   {
     prefix: "too large",
+    code: "TOO_LARGE",
     title: "This file is too large to process",
     hint: "This file exceeds the size or sample limit this converter can handle in the browser.",
   },
   {
+    // Output storage is (or ran) full. Messages come from the worker (diagnostics.js).
+    prefix: "storage full",
+    contains: "needs ",
+    code: "STORAGE_FULL",
+    title: "Not enough storage space for the converted file",
+    hint: "",
+    hintFor: (details) => {
+      const m = /needs (\d+) bytes but only (\d+) bytes/.exec(details);
+      const need = m ? formatBytes(Number(m[1])) : "the converted file";
+      const have = m ? ` but only ${formatBytes(Number(m[2]))} is available` : "";
+      return (
+        `The converted file needs about ${need} of free space in the browser\u2019s storage${have}. ` +
+        "Free up disk space on the drive that holds your browser profile (usually C: on Windows), " +
+        "or close private/incognito windows, then try again. Saving the result to your Downloads " +
+        "folder needs the same amount of space again."
+      );
+    },
+  },
+  {
+    prefix: "storage full",
+    code: "STORAGE_FULL",
+    title: "The disk ran out of space while saving",
+    hint: "",
+    hintFor: (details) => {
+      const m = /after (\d+)(?: of (\d+))? bytes/.exec(details);
+      const done = m ? formatBytes(Number(m[1])) : "part";
+      const total = m && m[2] ? ` of ${formatBytes(Number(m[2]))}` : "";
+      return (
+        `Saving stopped after ${done}${total} because the disk or the browser\u2019s storage limit was ` +
+        "reached. Free up disk space (the converted file needs room in the browser\u2019s storage and " +
+        "again in your Downloads folder), then try again."
+      );
+    },
+  },
+  {
     prefix: "output error",
+    code: "OUTPUT_ERROR",
     title: "Couldn\u2019t save the converted file",
     hint: "Check that the browser has free storage space, then try again.",
   },
   {
+    prefix: "I/O error: read failed at offset",
+    code: "READ_FAILED",
+    title: "Couldn\u2019t read the file",
+    hint: "",
+    hintFor: (details) => {
+      const at = /offset (\d+)/.exec(details);
+      const where = at ? ` at byte ${at[1]}` : "";
+      return (
+        `The browser stopped being able to read the file${where}. The file may have been moved, ` +
+        "renamed or changed during conversion, or it is on a network or removable drive that " +
+        "disconnected. Copy the file to a local disk and try again."
+      );
+    },
+  },
+  {
+    prefix: "The conversion worker stopped",
+    code: "WORKER_STOPPED",
+    title: "The converter stopped unexpectedly",
+    hint:
+      "This usually means the browser ran out of memory. Close other tabs and applications and try " +
+      "again. If it keeps happening, copy the diagnostics and report them.",
+  },
+  {
     prefix: "memory budget exceeded",
+    code: "MEMORY_BUDGET",
     title: "Not enough memory to hold this file",
     hint: "Download or remove finished files first, then try again.",
   },
   {
     prefix: "I/O error",
+    code: "READ_FAILED",
     title: "Couldn\u2019t read the file",
     hint: "The file could not be read. Check that it still exists and is not being changed, then try again.",
   },
@@ -81,17 +150,17 @@ function messageText(messageOrError) {
 /**
  * Describes an engine error for display.
  * @param {string|Error|unknown} messageOrError
- * @returns {{title: string, hint: string, details: string}}
+ * @returns {{title: string, hint: string, details: string, code: string}}
  */
 export function describeError(messageOrError) {
   const details = messageText(messageOrError);
   for (const rule of RULES) {
     if (details.startsWith(rule.prefix) && (!rule.contains || details.includes(rule.contains))) {
       const hint = rule.hintFor ? rule.hintFor(details) : rule.hint;
-      return { title: rule.title, hint, details };
+      return { title: rule.title, hint, details, code: rule.code ?? DEFAULT_CODE };
     }
   }
-  return { title: DEFAULT_TITLE, hint: DEFAULT_HINT, details };
+  return { title: DEFAULT_TITLE, hint: DEFAULT_HINT, details, code: DEFAULT_CODE };
 }
 
 /**

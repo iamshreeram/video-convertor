@@ -101,6 +101,8 @@ pub struct Frame {
     pub group: bool, // write as BlockGroup (key => no ReferenceBlock)
     pub duration_ms: Option<u64>,
     pub lace: bool,
+    /// Lacing type when `lace` is set: 1 Xiph, 2 fixed-size, 3 EBML.
+    pub lace_kind: u8,
     pub discard_padding_ns: Option<i64>,
 }
 impl Frame {
@@ -113,6 +115,7 @@ impl Frame {
             group: false,
             duration_ms: None,
             lace: false,
+            lace_kind: 1,
             discard_padding_ns: None,
         }
     }
@@ -195,7 +198,7 @@ fn block_bytes(f: &Frame, cluster_tc_ms: i64, scale: u64) -> Vec<u8> {
         0
     };
     if f.lace {
-        flags |= 0x02;
+        flags |= f.lace_kind << 1;
     }
     b.push(flags);
     b.extend_from_slice(&f.data);

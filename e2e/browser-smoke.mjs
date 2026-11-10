@@ -19,6 +19,7 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { relaceAudio } from "./fixtures/relace-audio.mjs";
 
 const execFileAsync = promisify(execFile);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -1854,6 +1855,187 @@ async function testT26(env) {
   return `10 min 720p+Vorbis+100 MB tail converted in ${seconds.toFixed(1)} s; duration ${out.duration.toFixed(2)} s; A/V gaps ${gaps.startGap.toFixed(3)}/${gaps.endGap.toFixed(3)} s`;
 }
 
+// ---------- T27-T30: laced audio, error panel + diagnostics, storage limits ----------
+
+// Audio packed into laced blocks (Xiph and EBML lacing) must convert to the identical MP4.
+async function testT27(env) {
+  const src = fixture("h264_aac");
+  const page = await openApp(env, { url: shared.root });
+  const base = await convertOne(page, src);
+  await expectDone(page, base.pick, base.state);
+  const baseSha = await downloadSha(page, base.pick, path.join(WORK, "t27-base.mp4"));
+  const notes = [];
+  for (const kind of ["xiph", "ebml"]) {
+    const laced = path.join(WORK, `t27-${kind}.mkv`);
+    const blocks = relaceAudio(src, laced, { track: 2, group: 4, kind });
+    assert(blocks > 0, `${kind}: no audio blocks were laced`);
+    const run = await convertOne(page, laced);
+    await expectDone(page, run.pick, run.state);
+    const warnings = await cardText(page, run.pick, testid("job-warnings")).catch(() => "");
+    assert(!/laced|Skipped track/i.test(warnings), `${kind}: audio reported as skipped: "${warnings}"`);
+    const chips = (await cardOf(page, run.pick).locator(testid("job-track")).allTextContents()).map((t) => t.trim());
+    assert(chips.some((t) => /AAC/.test(t)), `${kind}: no AAC chip: ${JSON.stringify(chips)}`);
+    const sha = await downloadSha(page, run.pick, path.join(WORK, `t27-${kind}.mp4`));
+    assert(sha === baseSha, `${kind}: laced input gave a different MP4 than the unlaced original`);
+    notes.push(`${kind} (${blocks} laced blocks)`);
+  }
+  return `${notes.join(" and ")}: output identical to the unlaced file`;
+}
+
+// Collects console output of a page: [{type, text}].
+function recordConsole(page) {
+  const lines = [];
+  page.on("console", (msg) => lines.push({ type: msg.type(), text: msg.text() }));
+  return lines;
+}
+
+// Failure: friendly panel with an error code, a copy button, and diagnostics in the console.
+async function testT28(env) {
+  const secret = path.join(WORK, "secret-holiday-4821.mkv");
+  fs.writeFileSync(secret, randomBytes(5 * 1024));
+  const context = await newContext(env);
+  await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: shared.origin });
+  const page = await openPageIn(env, context, shared.root);
+  const lines = recordConsole(page);
+  const { pick, state } = await convertOne(page, secret);
+  assert(state === "error", `garbage file: expected error, got ${state}`);
+  const card = cardOf(page, pick);
+  assert(
+    (await card.locator(testid("job-error-code")).textContent()).trim() === "NOT_MKV",
+    "error code is not NOT_MKV",
+  );
+  const button = card.locator(testid("job-copy-diagnostics"));
+  assert(await button.isVisible(), "copy-diagnostics button is not visible");
+  const label = (await button.getAttribute("aria-label")) || "";
+  assert(label.includes("secret-holiday-4821"), `copy button label lacks the file name: "${label}"`);
+  await button.click();
+  await waitUntil(
+    async () => /Copied/.test((await card.locator(testid("job-copy-status")).textContent()) || ""),
+    5000,
+    "no 'Copied' confirmation",
+  );
+  const clip = await page.evaluate(() => navigator.clipboard.readText());
+  assert(!clip.includes("secret-holiday"), "the file name leaked into the diagnostics");
+  const diag = JSON.parse(clip);
+  assert(diag.schema === 1 && diag.error && diag.error.code === "NOT_MKV", `diagnostics error: ${JSON.stringify(diag.error)}`);
+  assert(diag.input.extension === "mkv" && diag.input.bytes === 5 * 1024, `input: ${JSON.stringify(diag.input)}`);
+  assert(diag.stages.some((x) => x.name === "scan"), `stages: ${JSON.stringify(diag.stages.map((x) => x.name))}`);
+  assert(diag.extra && diag.extra.failedStage === "scan", `failed stage: ${diag.extra && diag.extra.failedStage}`);
+  assert(typeof diag.env.cores === "number", "no core count in env");
+  const logged = lines.find((l) => l.type === "error" && l.text.startsWith("[mkv2mp4]") && /NOT_MKV/.test(l.text));
+  assert(logged, `no [mkv2mp4] error line in the console: ${JSON.stringify(lines.slice(0, 4))}`);
+  assert(lines.some((l) => l.type === "log" && l.text.includes('"schema": 1')), "full JSON record was not logged");
+  assert(!lines.some((l) => l.text.includes("secret-holiday")), "the file name was written to the console");
+
+  // A good file logs an info record with timings and I/O.
+  const ok = await convertOne(page, fixture("h264_aac"));
+  await expectDone(page, ok.pick, ok.state);
+  const info = lines.find((l) => l.type === "info" && l.text.includes("finished in"));
+  assert(info, "no finished-conversion line in the console");
+  const record = lines.filter((l) => l.type === "log" && l.text.includes('"schema": 1')).map((l) => JSON.parse(l.text)).find((d) => !d.error);
+  assert(record, "no JSON record for the successful run");
+  const names = record.stages.map((x) => x.name);
+  for (const want of ["scan", "prepare-output", "convert"]) assert(names.includes(want), `stage ${want} missing: ${names}`);
+  const size = fs.statSync(fixture("h264_aac")).size;
+  const scanStage = record.stages.find((x) => x.name === "scan");
+  const copyStage = record.stages.find((x) => x.name === "convert");
+  assert(scanStage.readBytes >= size * 0.9 && scanStage.readBytes <= size * 1.5, `scan read ${scanStage.readBytes} of a ${size} byte file`);
+  assert(copyStage.writeBytes > 0, "no output bytes recorded");
+  assert(record.io.readBytes < size * 2.6, `file read ${record.io.readBytes} bytes in total (${size} byte file): the scan is repeated`);
+  return `error code, copy button and console record verified; scan read ${scanStage.readBytes} B and copy read ${copyStage.readBytes} B of ${size} B`;
+}
+
+// Makes navigator.storage.estimate() report the given numbers inside the conversion worker, by
+// prepending a patch to the worker script. (The DevTools quota override changes what writes are
+// allowed but not what estimate() reports, so it cannot drive the up-front check.)
+const WORKER_SCRIPT = "**/workers/convert.worker.js";
+async function patchStorageEstimate(context, estimate) {
+  await context.route(WORKER_SCRIPT, async (route) => {
+    const response = await route.fetch();
+    const body = await response.text();
+    const patch = `Object.defineProperty(StorageManager.prototype, "estimate", { configurable: true, value: async () => (${JSON.stringify(estimate)}) });\n`;
+    await route.fulfill({ response, body: patch + body });
+  });
+}
+
+// The browser's own storage estimate is checked before copying; too little room falls back to memory
+// for small results (T29).
+async function testT29(env) {
+  const context = await newContext(env);
+  await patchStorageEstimate(context, { quota: 50_000, usage: 0 });
+  const page = await openPageIn(env, context, shared.root);
+  const lines = recordConsole(page);
+  const { pick, state } = await convertOne(page, fixture("h264_aac"));
+  await expectDone(page, pick, state);
+  const record = lines.filter((l) => l.type === "log" && l.text.includes('"schema": 1')).map((l) => JSON.parse(l.text)).at(-1);
+  assert(record && record.storage, "no storage record in the diagnostics");
+  assert(/memory \(browser storage too small\)/.test(record.storage.mode), `storage mode: ${record.storage.mode}`);
+  assert(record.storage.enough === false && record.storage.known === true, `storage: ${JSON.stringify(record.storage)}`);
+  const names = await opfsOutNames(page);
+  assert(names.length === 0, `OPFS files were created although storage was too small: ${names}`);
+  const dest = path.join(WORK, "t29.mp4");
+  await downloadFrom(page, pick, dest);
+  const { problems } = await verifyOutput(fixture("h264_aac"), dest, null);
+  assert(problems.length === 0, problems.join("; "));
+  return `quota 50 kB: result kept in memory (${record.storage.needed} B needed), valid MP4, no OPFS file`;
+}
+
+// Large result with too little storage: fails at once with numbers; and a disk that fills up part
+// way through is reported with how far it got.
+async function testT30(env) {
+  const base = await ensureSample("big_storage", [
+    "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=25",
+    "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+    "-t", "450", "-c:v", "libx264", "-preset", "ultrafast", "-b:v", "24M", "-maxrate", "24M", "-bufsize", "48M",
+    "-c:a", "aac", "-b:a", "128k",
+  ]);
+  const size = fs.statSync(base).size;
+  assert(size > 560 * 1024 * 1024, `sample is only ${size} bytes; it must exceed the 512 MiB memory fallback`);
+
+  const context = await newContext(env);
+  await patchStorageEstimate(context, { quota: 100 * 1024 * 1024, usage: 0 });
+  const page = await openPageIn(env, context, shared.root);
+  const client = await context.newCDPSession(page);
+
+  // 1. too little room from the start
+  const started = Date.now();
+  const first = await convertOne(page, base, 300000);
+  assert(first.state === "error", `expected an error, got ${first.state}`);
+  const text = await cardText(page, first.pick, testid("job-error"));
+  assert(/Not enough storage space for the converted file/.test(text), `title: "${firstLine(text)}"`);
+  assert(/needs about \d/.test(text) && /available/.test(text) && /Free up/.test(text), `hint: "${text}"`);
+  const code = (await cardOf(page, first.pick).locator(testid("job-error-code")).textContent()).trim();
+  assert(code === "STORAGE_FULL", `code ${code}`);
+  assert((await opfsOutNames(page)).length === 0, "an output file was left behind");
+  const preflightSecs = (Date.now() - started) / 1000;
+
+  // 2. enough room at the start (real estimate), then the real quota is cut while copying
+  await context.unroute(WORKER_SCRIPT);
+  await client.send("Storage.overrideQuotaForOrigin", { origin: shared.origin, quotaSize: 4 * 1024 * 1024 * 1024 });
+  const before = await cardCount(page);
+  await addFiles(page, [base]);
+  const pick = { index: before };
+  await waitUntil(
+    async () => {
+      const progress = await cardOf(page, pick).locator(testid("job-progress")).getAttribute("aria-valuenow");
+      return Number(progress) >= 3;
+    },
+    300000,
+    "conversion never reached 3 %",
+    50,
+  );
+  await client.send("Storage.overrideQuotaForOrigin", { origin: shared.origin, quotaSize: 1024 * 1024 });
+  const state = await waitCard(page, pick, ["error", "done"], 300000);
+  await client.send("Storage.overrideQuotaForOrigin", { origin: shared.origin });
+  assert(state === "error", `mid-copy quota cut: expected an error, got ${state}`);
+  const mid = await cardText(page, pick, testid("job-error"));
+  assert(/The disk ran out of space while saving/.test(mid), `title: "${firstLine(mid)}"`);
+  const details = await cardText(page, pick, `${testid("job-error-details")} code`);
+  assert(/^storage full: disk write failed after \d+ of \d+ bytes/.test(details.trim()), `details: "${details}"`);
+  assert((await opfsOutNames(page)).length === 0, "a partial output file was left behind");
+  return `preflight refused in ${preflightSecs.toFixed(1)} s with sizes; mid-copy cut reported "${details.trim().slice(0, 80)}"`;
+}
+
 const TESTS = [
   { id: "T1", title: "OPFS convert h264_aac at /video-convertor/ (chips, download, ffprobe, preview)", timeoutMs: 300000, run: testT1 },
   { id: "T2", title: "in-memory sink (?nofs=1) gives the same bytes, no OPFS files", timeoutMs: 300000, run: testT2 },
@@ -1882,6 +2064,10 @@ const TESTS = [
   { id: "T24", title: "Vorbis -> Opus path in real Chrome (forced): valid MP4, sync, loudness", timeoutMs: 300000, run: testT24 },
   { id: "T25", title: "5.1 Vorbis: job finishes with video; audio either re-encoded with 6 channels or skipped with a warning", timeoutMs: 300000, run: testT25 },
   { id: "T26", title: "10 min 720p B-frames + Vorbis + 100 MB zero tail: converts, no A/V drift", big: true, timeoutMs: 1800000, run: testT26 },
+  { id: "T27", title: "laced audio (Xiph and EBML lacing) converts to the identical MP4 as the unlaced file", timeoutMs: 300000, run: testT27 },
+  { id: "T28", title: "error panel: code, copy-diagnostics button, [mkv2mp4] console records, no file name leaked; input scanned once", timeoutMs: 300000, run: testT28 },
+  { id: "T29", title: "browser storage estimate too small: small results fall back to memory (no OPFS file)", timeoutMs: 300000, run: testT29 },
+  { id: "T30", title: "large result, too little storage: refused up front with sizes; quota cut while copying is reported with progress", big: true, timeoutMs: 1800000, run: testT30 },
 ];
 
 // ---------- main ----------

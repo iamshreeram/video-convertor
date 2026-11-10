@@ -126,6 +126,8 @@ const MAX_CODEC_PRIVATE: u64 = 1024 * 1024;
 const MAX_EBML_HEADER: u64 = 64 * 1024;
 /// Largest block header: 8-byte track vint + i16 timecode + flags.
 const MAX_BLOCK_HEADER: usize = 8 + 3;
+/// Largest lace header (frame count + size table) that is read; audio frames are small.
+const MAX_LACE_HEADER: usize = 8192;
 const DEFAULT_TIMECODE_SCALE: u64 = 1_000_000;
 const DEFAULT_SAMPLING_FREQUENCY: f64 = 8000.0;
 const TRUNCATED_WARNING: &str = "file appears truncated; trailing data ignored";
@@ -443,8 +445,9 @@ struct GroupState {
     discard_ns: Option<i64>,
 }
 
-/// A parsed, non-laced block whose track is known.
-#[derive(Clone, Copy)]
+/// A parsed block whose track is known. For a laced block `offset`/`size` describe the first
+/// frame and `frames` lists every frame as `(offset, size)`; otherwise `frames` is empty.
+#[derive(Clone)]
 struct BlockRef {
     track: usize,
     offset: u64,
@@ -452,6 +455,7 @@ struct BlockRef {
     pts_ns: i64,
     /// SimpleBlock keyframe flag (ignored for BlockGroup members).
     keyframe: bool,
+    frames: Vec<(u64, u32)>,
 }
 
 /// TrackEntry under construction.
@@ -864,15 +868,196 @@ impl Scanner {
             ),
             None => None,
         };
-        let sample = SampleRef {
-            offset: b.offset,
-            size: b.size,
-            pts_ns: b.pts_ns,
-            keyframe: !group.has_reference,
-            duration_ns,
-            discard_padding_ns: group.discard_ns,
+        let keyframe = !group.has_reference;
+        self.push_block(b, duration_ns, keyframe, group.discard_ns)
+    }
+
+    /// Adds a block as one sample, or as one sample per frame when it is laced.
+    fn push_block(
+        &mut self,
+        b: BlockRef,
+        duration_ns: Option<u64>,
+        keyframe: bool,
+        discard_ns: Option<i64>,
+    ) -> Result<()> {
+        if b.frames.is_empty() {
+            let sample = SampleRef {
+                offset: b.offset,
+                size: b.size,
+                pts_ns: b.pts_ns,
+                keyframe,
+                duration_ns,
+                discard_padding_ns: discard_ns,
+            };
+            return self.push_sample(b.track, sample);
+        }
+        let count = b.frames.len() as u64;
+        let Some(frame_ns) = self.lace_frame_ns(b.track, count, duration_ns) else {
+            // Without a frame duration the timestamps of the packed frames are unknowable.
+            if let Some(t) = self.tracks.get_mut(b.track) {
+                t.laced = true;
+            }
+            return Ok(());
         };
-        self.push_sample(b.track, sample)
+        for (i, &(offset, size)) in b.frames.iter().enumerate() {
+            let step = frame_ns
+                .checked_mul(i as u64)
+                .and_then(|v| i64::try_from(v).ok())
+                .ok_or_else(|| invalid("laced block timestamp overflows"))?;
+            let pts_ns = b
+                .pts_ns
+                .checked_add(step)
+                .ok_or_else(|| invalid("laced block timestamp overflows"))?;
+            let last = i as u64 + 1 == count;
+            let sample = SampleRef {
+                offset,
+                size,
+                pts_ns,
+                keyframe,
+                duration_ns: Some(frame_ns),
+                discard_padding_ns: if last { discard_ns } else { None },
+            };
+            self.push_sample(b.track, sample)?;
+        }
+        Ok(())
+    }
+
+    /// Duration of one frame inside a laced block: from the block duration, else the track's
+    /// DefaultDuration, else the codec's fixed frame length.
+    fn lace_frame_ns(&self, track: usize, count: u64, block_ns: Option<u64>) -> Option<u64> {
+        if let Some(d) = block_ns.map(|d| d / count).filter(|d| *d > 0) {
+            return Some(d);
+        }
+        let t = self.tracks.get(track)?;
+        if let Some(d) = t.default_duration_ns.filter(|d| *d > 0) {
+            return Some(d);
+        }
+        let samples: f64 = match t.codec_id.as_str() {
+            id if id.starts_with("A_AAC") => 1024.0,
+            "A_MPEG/L3" | "A_MPEG/L2" => 1152.0,
+            "A_AC3" => 1536.0,
+            _ => return None,
+        };
+        let rate = t.audio.as_ref()?.sampling_frequency;
+        if !rate.is_finite() || rate < 1.0 {
+            return None;
+        }
+        let ns = (samples * 1e9 / rate).round();
+        (1.0..1e12).contains(&ns).then_some(ns as u64)
+    }
+
+    /// Parses the lace header of an audio block. `None` means the block is malformed or uses a
+    /// layout that cannot be read; the caller then marks the track as laced (skipped).
+    #[allow(clippy::too_many_arguments)]
+    fn read_lace<B: Source>(
+        src: &mut B,
+        track: usize,
+        data: u64,
+        size: u64,
+        hdr: u64,
+        pts_ns: i64,
+        flags: u8,
+    ) -> Result<Option<BlockRef>> {
+        let body = size
+            .checked_sub(hdr)
+            .ok_or_else(|| invalid("block header larger than its element"))?;
+        let want = body.min(MAX_LACE_HEADER as u64) as usize;
+        let mut buf = vec![0u8; want];
+        src.read_at(
+            data.checked_add(hdr)
+                .ok_or_else(|| invalid("block offset overflows"))?,
+            &mut buf,
+        )?;
+        let Some(&first) = buf.first() else {
+            return Ok(None);
+        };
+        let count = usize::from(first) + 1;
+        let mut pos = 1usize;
+        let mut sizes: Vec<u64> = Vec::new();
+        match (flags >> 1) & 3 {
+            1 => {
+                // Xiph: each size is a run of 255s plus a final byte.
+                for _ in 0..count - 1 {
+                    let mut total = 0u64;
+                    loop {
+                        let Some(&b) = buf.get(pos) else {
+                            return Ok(None);
+                        };
+                        pos += 1;
+                        total += u64::from(b);
+                        if b != 255 {
+                            break;
+                        }
+                    }
+                    sizes.push(total);
+                }
+            }
+            3 if count > 1 => {
+                // EBML: first size is a vint, the rest are signed differences.
+                let Some(v) = buf.get(pos..).map(ebml::parse_vint).transpose()?.flatten() else {
+                    return Ok(None);
+                };
+                pos += v.len;
+                sizes.push(v.value);
+                for _ in 0..count - 2 {
+                    let Some(d) = buf.get(pos..).map(ebml::parse_vint).transpose()?.flatten()
+                    else {
+                        return Ok(None);
+                    };
+                    pos += d.len;
+                    let bias = (1i64 << (7 * d.len - 1)) - 1;
+                    let prev = i64::try_from(sizes.last().copied().unwrap_or(0)).unwrap_or(-1);
+                    let next = prev + (d.value as i64 - bias);
+                    let Ok(next) = u64::try_from(next) else {
+                        return Ok(None);
+                    };
+                    sizes.push(next);
+                }
+            }
+            _ => {}
+        }
+        let payload = body
+            .checked_sub(pos as u64)
+            .ok_or_else(|| invalid("lace header larger than its block"))?;
+        if (flags >> 1) & 3 == 2 {
+            // Fixed size: all frames are equal.
+            let n = count as u64;
+            if payload == 0 || payload % n != 0 {
+                return Ok(None);
+            }
+            sizes = vec![payload / n; count];
+        } else {
+            let used: u64 = sizes.iter().sum();
+            let Some(last) = payload.checked_sub(used) else {
+                return Ok(None);
+            };
+            sizes.push(last);
+        }
+        if sizes.len() != count || sizes.iter().any(|s| *s == 0 || *s > u64::from(u32::MAX)) {
+            return Ok(None);
+        }
+        let mut frames = Vec::with_capacity(count);
+        let mut offset = data
+            .checked_add(hdr)
+            .and_then(|o| o.checked_add(pos as u64))
+            .ok_or_else(|| invalid("block offset overflows"))?;
+        for s in sizes {
+            let s32 =
+                u32::try_from(s).map_err(|_| Error::TooLarge("laced frame too large".into()))?;
+            frames.push((offset, s32));
+            offset = offset
+                .checked_add(s)
+                .ok_or_else(|| invalid("block offset overflows"))?;
+        }
+        let (first_offset, first_size) = frames.first().copied().unwrap_or((0, 0));
+        Ok(Some(BlockRef {
+            track,
+            offset: first_offset,
+            size: first_size,
+            pts_ns,
+            keyframe: flags & 0x80 != 0,
+            frames,
+        }))
     }
 
     fn push_sample(&mut self, track: usize, sample: SampleRef) -> Result<()> {
@@ -913,13 +1098,27 @@ impl Scanner {
         let Some(&track) = self.track_index.get(&vint.value) else {
             return Ok(None);
         };
+        let hdr = (vint.len + 3) as u64;
         if flags & 0x06 != 0 {
+            let units = i128::from(self.cluster_tc) + i128::from(i16::from_be_bytes([r0, r1]));
+            let pts_ns = units
+                .checked_mul(i128::from(self.timecode_scale))
+                .and_then(|v| i64::try_from(v).ok())
+                .ok_or_else(|| invalid("block timestamp overflows"))?;
+            let is_audio = self
+                .tracks
+                .get(track)
+                .is_some_and(|t| t.kind == TrackKind::Audio);
+            if is_audio {
+                if let Some(b) = Self::read_lace(src, track, data, size, hdr, pts_ns, flags)? {
+                    return Ok(Some(b));
+                }
+            }
             if let Some(t) = self.tracks.get_mut(track) {
                 t.laced = true;
             }
             return Ok(None);
         }
-        let hdr = (vint.len + 3) as u64;
         let payload = size
             .checked_sub(hdr)
             .ok_or_else(|| invalid("block header larger than its element"))?;
@@ -939,6 +1138,7 @@ impl Scanner {
             size: size32,
             pts_ns,
             keyframe: flags & 0x80 != 0,
+            frames: Vec::new(),
         }))
     }
 
@@ -1107,15 +1307,8 @@ impl Scanner {
             ID_TIMECODE => self.cluster_tc = read_uint(src, data, size)?,
             ID_SIMPLE_BLOCK => {
                 if let Some(b) = self.read_block(src, data, size)? {
-                    let sample = SampleRef {
-                        offset: b.offset,
-                        size: b.size,
-                        pts_ns: b.pts_ns,
-                        keyframe: b.keyframe,
-                        duration_ns: None,
-                        discard_padding_ns: None,
-                    };
-                    self.push_sample(b.track, sample)?;
+                    let keyframe = b.keyframe;
+                    self.push_block(b, None, keyframe, None)?;
                 }
             }
             _ => {}

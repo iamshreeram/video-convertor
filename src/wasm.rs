@@ -8,8 +8,8 @@
 use wasm_bindgen::prelude::*;
 
 use crate::convert::{
-    convert_with_replacements, export_track_packets, probe_with_replacements, ConvertOptions,
-    ReplacementSample, TrackReplacement,
+    convert_with_replacements, export_track_packets, probe_with_replacements, scan_source,
+    ConvertOptions, ReplacementSample, Scanned, TrackReplacement,
 };
 use crate::error::{Error, Result as CrateResult};
 use crate::json::{probe_to_json, report_to_json};
@@ -153,6 +153,158 @@ pub fn export_audio_track(
     };
     let info = export_track_packets(source, track_number as u64, &mut deliver)
         .map_err(|e| JsError::new(&e.to_string()))?;
+    let out = js_sys::Object::new();
+    let set = |key: &str, value: JsValue| -> Result<(), JsError> {
+        js_sys::Reflect::set(&out, &JsValue::from_str(key), &value)
+            .map(|_| ())
+            .map_err(|_| JsError::new("could not build the result object"))
+    };
+    set("codecId", JsValue::from_str(&info.codec_id))?;
+    set(
+        "codecPrivate",
+        js_sys::Uint8Array::from(info.codec_private.as_slice()).into(),
+    )?;
+    set("sampleRate", JsValue::from_f64(info.sample_rate))?;
+    set("channels", JsValue::from_f64(f64::from(info.channels)))?;
+    Ok(out.into())
+}
+
+/// A scanned MKV file. The scan reads every byte of the input, so the page scans once and then
+/// probes, exports audio and converts from this object instead of scanning again.
+#[wasm_bindgen]
+pub struct Scan {
+    file_size: u64,
+    scanned: Option<Scanned>,
+}
+
+#[wasm_bindgen]
+impl Scan {
+    /// Scans the file. `progress(fraction)` is informational; its exceptions are ignored.
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        file_size: f64,
+        read: &js_sys::Function,
+        progress: &js_sys::Function,
+    ) -> Result<Scan, JsError> {
+        let len = validated_file_size(file_size)?;
+        let source = JsSource {
+            len,
+            read: read.clone(),
+        };
+        let mut report = |pos: u64, total: u64| {
+            if total > 0 {
+                let _ = progress.call1(
+                    &JsValue::NULL,
+                    &JsValue::from_f64(pos as f64 / total as f64),
+                );
+            }
+        };
+        let scanned = scan_source(source, &mut report).map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(Scan {
+            file_size: len,
+            scanned: Some(scanned),
+        })
+    }
+
+    /// Probe JSON, as `probe_mkv_ex`, without scanning again.
+    pub fn probe(&self, read: &js_sys::Function, replacement: &JsValue) -> Result<String, JsError> {
+        let scanned = self.scanned()?;
+        let source = JsSource {
+            len: self.file_size,
+            read: read.clone(),
+        };
+        let (replacements, extra) = parse_replacement(replacement)?;
+        scanned
+            .probe(source, extra, &replacements)
+            .map(|r| probe_to_json(&r))
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// As `export_audio_track`, without scanning again.
+    pub fn export_audio_track(
+        &self,
+        read: &js_sys::Function,
+        track_number: f64,
+        on_packet: &js_sys::Function,
+    ) -> Result<JsValue, JsError> {
+        let scanned = self.scanned()?;
+        if !track_number.is_finite() || track_number < 0.0 || track_number > 9_007_199_254_740_991.0
+        {
+            return Err(JsError::new("invalid track number"));
+        }
+        let source = JsSource {
+            len: self.file_size,
+            read: read.clone(),
+        };
+        let mut deliver = |pts_ns: i64, data: &[u8]| -> CrateResult<()> {
+            let chunk = js_sys::Uint8Array::from(data);
+            on_packet
+                .call2(&JsValue::NULL, &JsValue::from_f64(pts_ns as f64), &chunk)
+                .map(|_| ())
+                .map_err(|e| Error::Sink(js_message(&e)))
+        };
+        let info = scanned
+            .export_track_packets(source, track_number as u64, &mut deliver)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        export_info_to_js(&info)
+    }
+
+    /// As `convert_mkv_to_mp4_ex`, without scanning again. `progress` covers 0..1 of the write
+    /// phase only. The scan is used up: later calls fail.
+    pub fn convert(
+        &mut self,
+        max_output_bytes: f64,
+        read: &js_sys::Function,
+        write: &js_sys::Function,
+        progress: &js_sys::Function,
+        replacement: &JsValue,
+    ) -> Result<String, JsError> {
+        let scanned = self
+            .scanned
+            .take()
+            .ok_or_else(|| JsError::new("the scan was already used"))?;
+        let max_output = if max_output_bytes.is_finite() && max_output_bytes > 0.0 {
+            Some(max_output_bytes as u64)
+        } else {
+            None
+        };
+        let source = JsSource {
+            len: self.file_size,
+            read: read.clone(),
+        };
+        let mut sink = JsSink {
+            write: write.clone(),
+        };
+        let options = ConvertOptions {
+            max_output_bytes: max_output,
+        };
+        let mut report_progress = |fraction: f64| {
+            let _ = progress.call1(&JsValue::NULL, &JsValue::from_f64(fraction));
+        };
+        let (replacements, extra) = parse_replacement(replacement)?;
+        scanned
+            .convert(
+                source,
+                extra,
+                &replacements,
+                &mut sink,
+                &options,
+                &mut report_progress,
+            )
+            .map(|r| report_to_json(&r))
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+}
+
+impl Scan {
+    fn scanned(&self) -> Result<&Scanned, JsError> {
+        self.scanned
+            .as_ref()
+            .ok_or_else(|| JsError::new("the scan was already used"))
+    }
+}
+
+fn export_info_to_js(info: &crate::convert::TrackExport) -> Result<JsValue, JsError> {
     let out = js_sys::Object::new();
     let set = |key: &str, value: JsValue| -> Result<(), JsError> {
         js_sys::Reflect::set(&out, &JsValue::from_str(key), &value)

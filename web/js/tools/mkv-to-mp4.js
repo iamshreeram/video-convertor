@@ -9,6 +9,8 @@
 
 import { h } from "../core/dom.js";
 import { icon } from "../core/icons.js";
+import { buildDiagnostics, logDiagnostics } from "../core/diagnostics.js";
+import { describeError } from "../core/errors.js";
 import { createMeter, formatBytes } from "../core/format.js";
 import { createMemoryBudget } from "../core/memory-budget.js";
 import { createConvertWorker } from "../core/worker-factory.js";
@@ -186,12 +188,26 @@ export async function mount(container, ctx) {
         }
       };
 
-      /** @param {string} message @param {string} [details] */
-      const fail = (message, details) => {
+      /**
+       * @param {string} message @param {string} [details]
+       * @param {object} [diagnostics] record from the worker; built here when the worker died
+       */
+      const fail = (message, details, diagnostics) => {
         if (finished) return;
         finished = true;
         stop();
-        jobCtx.update({ errorDetails: details ?? message });
+        const diag =
+          diagnostics && typeof diagnostics === "object"
+            ? diagnostics
+            : buildDiagnostics({
+                env: { userAgent: navigator.userAgent, cores: navigator.hardwareConcurrency ?? null },
+                file,
+                error: { name: "Error", message },
+              });
+        // The stable code comes from the same mapper the card uses, so both always agree.
+        if (diag.error) diag.error.code = describeError(message).code;
+        logDiagnostics("error", diag);
+        jobCtx.update({ errorDetails: details ?? message, diagnostics: diag });
         reject(new Error(message));
       };
 
@@ -212,6 +228,7 @@ export async function mount(container, ctx) {
         }
         finished = true;
         stop();
+        logDiagnostics("info", msg.diagnostics);
         publishStorage();
         resolve({
           url: URL.createObjectURL(out),
@@ -236,6 +253,9 @@ export async function mount(container, ctx) {
           case "analysis":
             jobCtx.update({ analysis: msg.report });
             break;
+          case "scan-progress":
+            if (typeof msg.fraction === "number") jobCtx.update({ scanProgress: msg.fraction });
+            break;
           case "progress": {
             if (!meter) meter = createMeter(file.size);
             const sample = meter.sample(msg.fraction, performance.now());
@@ -251,7 +271,7 @@ export async function mount(container, ctx) {
             succeed(msg);
             break;
           case "error":
-            fail(String(msg.message || "Conversion failed."), msg.details);
+            fail(String(msg.message || "Conversion failed."), msg.details, msg.diagnostics);
             break;
           default:
             break;
@@ -279,7 +299,20 @@ export async function mount(container, ctx) {
             publishStorage();
           }
           worker.onmessage = (event) => onMessage(event.data);
-          worker.onerror = () => fail(WORKER_STOPPED);
+          worker.onerror = (event) => {
+            const detail = event && event.message ? ` (${event.message})` : "";
+            const diag = buildDiagnostics({
+              env: { userAgent: navigator.userAgent, cores: navigator.hardwareConcurrency ?? null },
+              file,
+              error: { name: "WorkerError", message: `${WORKER_STOPPED}${detail}` },
+              extra: {
+                workerEvent: event
+                  ? { message: event.message ?? null, line: event.lineno ?? null, column: event.colno ?? null }
+                  : null,
+              },
+            });
+            fail(WORKER_STOPPED, `${WORKER_STOPPED}${detail}`, diag);
+          };
           worker.onmessageerror = () => fail(WORKER_STOPPED);
           const sweep = sweepPending;
           sweepPending = false;
