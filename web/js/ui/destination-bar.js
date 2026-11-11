@@ -76,7 +76,7 @@ export function createDestinationBar({ win = window, storage, pickFolder, onChan
     return h(
       "button",
       {
-        class: primary ? "btn btn--primary btn--sm" : "btn btn--ghost btn--sm",
+        class: primary ? "btn btn--primary btn--sm" : "btn btn--secondary btn--sm",
         dataset: { testid },
         attrs: { type: "button" },
         on: { click: onClick },
@@ -126,7 +126,9 @@ export function createDestinationBar({ win = window, storage, pickFolder, onChan
         button("destination-browser", "Use normal downloads instead", useBrowser, false),
       ];
     }
-    el.replaceChildren(icon("download", { size: 18 }), text, h("div", { class: "destination__actions" }, ...actions));
+    el.replaceChildren(
+      h("span", { class: "destination__icon", attrs: { "aria-hidden": "true" } }, icon("folder", { size: 20 })),
+      text, h("div", { class: "destination__actions" }, ...actions));
     if (hadFocus) {
       const first = el.querySelector("button");
       if (first) first.focus();

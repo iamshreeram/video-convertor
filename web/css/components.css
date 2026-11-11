@@ -54,8 +54,8 @@
   padding: 0 var(--space-3);
   border: 1px solid transparent;
   border-radius: var(--radius-md);
-  font-size: 0.9375rem;
-  font-weight: 600;
+  font-size: 0.875rem;
+  font-weight: 500;
   line-height: 1.2;
   text-decoration: none;
   white-space: nowrap;
@@ -73,15 +73,15 @@
 }
 
 .btn--lg {
-  min-height: 44px;
-  padding: 0 var(--space-4);
-  font-size: 1rem;
+  min-height: 40px;
+  padding: 0 var(--space-3);
+  font-size: 0.875rem;
 }
 
 .btn--primary {
   background: var(--accent);
   color: var(--on-accent);
-  box-shadow: var(--shadow-1);
+  font-weight: 600;
 }
 
 .btn--primary:hover:not(:disabled) {
@@ -138,18 +138,22 @@
   align-items: center;
   gap: 6px;
   min-height: var(--touch-min);
-  padding: 0 var(--space-3);
-  border: 1px solid var(--success-border);
-  border-radius: var(--radius-pill);
-  background: var(--success-soft);
-  color: var(--success);
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
   font-size: 0.8125rem;
-  font-weight: 600;
+  font-weight: 500;
   white-space: nowrap;
 }
 
+.privacy-badge .icon {
+  color: var(--success);
+}
+
 .privacy-badge:hover {
-  filter: brightness(0.97);
+  background: var(--surface-3);
 }
 
 /* ---- chips, pills, counters ---------------------------------------------- */
@@ -158,13 +162,13 @@
   align-items: center;
   gap: 6px;
   min-height: 24px;
-  padding: 2px 10px;
+  padding: 2px 8px;
   border: 1px solid transparent;
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-sm);
   background: var(--neutral-soft);
   color: var(--neutral-text);
   font-size: 0.8125rem;
-  font-weight: 600;
+  font-weight: 500;
   line-height: 1.2;
   white-space: nowrap;
 }
@@ -213,7 +217,7 @@
   align-items: center;
   height: 20px;
   padding: 0 8px;
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-sm);
   background: var(--surface-3);
   color: var(--text-muted);
   font-size: 0.75rem;
@@ -227,7 +231,7 @@
   height: 22px;
   margin-left: var(--space-2);
   padding: 0 var(--space-2);
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-sm);
   background: var(--surface-3);
   color: var(--text-muted);
   font-size: 0.8125rem;
@@ -269,6 +273,10 @@
   box-shadow: inset 3px 0 0 var(--accent);
 }
 
+.nav-item.is-active .nav-item__sub {
+  color: var(--text-muted);
+}
+
 .nav-item__title {
   display: flex;
   align-items: center;
@@ -291,19 +299,64 @@
   color: var(--text-subtle);
 }
 
-/* ---- dropzone ------------------------------------------------------------ */
-.dropzone {
-  position: relative;
+/* ---- workflow steps ------------------------------------------------------ */
+.tool {
   display: flex;
   flex-direction: column;
-  align-items: center;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.step {
+  display: flex;
+  flex-direction: column;
   gap: var(--space-2);
-  padding: var(--space-6) var(--space-4);
-  border: 2px dashed var(--border-strong);
+  min-width: 0;
+}
+
+.step__title,
+.job-list__title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  line-height: 1.3;
+  text-transform: uppercase;
+}
+
+.step__num {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-sm);
+  background: var(--text);
+  color: var(--surface);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+
+/* ---- dropzone: one compact row, not a hero ------------------------------- */
+.dropzone {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "icon title action"
+    "icon sub action";
+  align-items: center;
+  column-gap: var(--space-3);
+  row-gap: 2px;
+  padding: var(--space-3) var(--space-4);
+  border: 1px dashed var(--border-strong);
   border-radius: var(--radius-card);
   background: var(--surface);
-  box-shadow: var(--shadow-1);
-  text-align: center;
+  text-align: left;
 }
 
 .dropzone:hover {
@@ -311,44 +364,70 @@
 }
 
 .dropzone.is-dragover {
+  border-style: solid;
   border-color: var(--accent);
   background: var(--accent-soft);
 }
 
 .dropzone.is-disabled {
-  opacity: 0.6;
   border-style: solid;
+  border-color: var(--border);
+  background: var(--surface-2);
+}
+
+.dropzone.is-disabled .dropzone__icon {
+  background: var(--surface-3);
+  color: var(--text-subtle);
 }
 
 .dropzone__icon {
+  grid-area: icon;
   display: grid;
   place-items: center;
-  width: 56px;
-  height: 56px;
-  margin-bottom: var(--space-1);
-  border-radius: 16px;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-md);
   background: var(--accent-soft);
   color: var(--accent-text);
 }
 
 .dropzone__title {
-  font-size: 1.25rem;
+  grid-area: title;
+  font-size: 0.9375rem;
+  font-weight: 600;
 }
 
 .dropzone__sub {
-  max-width: 48ch;
+  grid-area: sub;
   color: var(--text-muted);
+  font-size: 0.8125rem;
 }
 
 .dropzone .btn {
-  margin-top: var(--space-2);
+  grid-area: action;
 }
 
-/* ---- job list ------------------------------------------------------------ */
+@media (max-width: 639px) {
+  .dropzone {
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-areas:
+      "icon title"
+      "sub sub"
+      "action action";
+    row-gap: var(--space-2);
+  }
+
+  .dropzone .btn {
+    width: 100%;
+  }
+}
+
+/* ---- job list: one bordered panel, one row per file ---------------------- */
 .job-list {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--space-2);
+  min-width: 0;
 }
 
 .job-list__head {
@@ -359,28 +438,25 @@
   gap: var(--space-2);
 }
 
-.job-list__title {
-  display: flex;
-  align-items: center;
-}
-
 .job-list__cards {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  container-type: inline-size;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: var(--shadow-1);
 }
 
 .empty-state {
   display: flex;
-  flex-direction: column;
   align-items: center;
-  gap: 12px;
-  padding: var(--space-5) var(--space-4);
-  border: 1px dashed var(--border-strong);
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--border);
   border-radius: var(--radius-card);
   background: var(--surface);
   color: var(--text-muted);
-  text-align: center;
 }
 
 .empty-state__art {
@@ -392,60 +468,69 @@
 .empty-state__badge {
   display: grid;
   place-items: center;
-  width: 40px;
-  height: 40px;
+  width: 32px;
+  height: 32px;
   border-radius: var(--radius-md);
   background: var(--surface-2);
   color: var(--text-subtle);
 }
 
 .empty-state__badge--main {
-  width: 56px;
-  height: 56px;
-  border-radius: 16px;
   background: var(--accent-soft);
   color: var(--accent-text);
 }
 
 .empty-state__text {
-  font-weight: 500;
+  font-size: 0.875rem;
 }
 
-/* ---- job card ------------------------------------------------------------ */
+/* ---- job row ------------------------------------------------------------- */
 .job {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+  position: relative;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  grid-template-areas:
+    "icon title status"
+    ". meta meta"
+    ". progress progress"
+    ". stage stage"
+    ". meters meters"
+    "extras extras extras"
+    "actions actions actions";
+  align-items: center;
+  column-gap: var(--space-3);
   min-width: 0;
-  padding: var(--space-3) 20px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-card);
-  background: var(--surface);
-  box-shadow: var(--shadow-1);
+  padding: 12px var(--space-3);
+  border-top: 1px solid var(--border);
+}
+
+.job:first-child {
+  border-top: 0;
 }
 
 .job__head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px;
-  min-width: 0;
+  display: contents;
 }
 
 .job__icon {
+  grid-area: icon;
   display: grid;
   place-items: center;
-  flex: none;
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
   background: var(--surface-2);
   color: var(--text-muted);
 }
 
+.job__head > .chip {
+  grid-area: status;
+  justify-self: end;
+}
+
 .job__title {
+  grid-area: title;
   display: flex;
-  flex: 1 1 200px;
   flex-direction: column;
   min-width: 0;
 }
@@ -463,16 +548,20 @@
 }
 
 .job__stage {
+  grid-area: stage;
+  margin-top: 4px;
   color: var(--text-muted);
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
 }
 
 .job__meters {
+  grid-area: meters;
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 16px;
+  gap: 2px var(--space-3);
+  margin-top: 2px;
   color: var(--text-muted);
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
 }
 
 .meter--strong {
@@ -481,21 +570,23 @@
 }
 
 .job__meta {
+  grid-area: meta;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-2);
+  gap: 4px var(--space-2);
+  margin-top: var(--space-2);
 }
 
 .job__tracks {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-2);
+  gap: var(--space-1) var(--space-2);
 }
 
 .job__fact {
   color: var(--text-muted);
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
 }
 
 .job__fact + .job__fact::before {
@@ -505,9 +596,11 @@
 }
 
 .job__extras {
+  grid-area: extras;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
 }
 
 .job__extras:empty {
@@ -520,7 +613,7 @@
   border-radius: var(--radius-md);
   background: var(--warning-soft);
   color: var(--text);
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
 }
 
 .job__warnings summary {
@@ -538,18 +631,18 @@
   display: flex;
   align-items: flex-start;
   gap: var(--space-2);
-  padding: 10px 14px;
+  padding: 8px 12px;
   border: 1px solid var(--success-border);
   border-radius: var(--radius-md);
   background: var(--success-soft);
   color: var(--text);
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
   overflow-wrap: anywhere;
 }
 
 .job__saved svg {
   flex: none;
-  margin-top: 2px;
+  margin-top: 1px;
   color: var(--success);
 }
 
@@ -559,6 +652,7 @@
   gap: 6px;
   padding: 12px 14px;
   border: 1px solid var(--danger-border);
+  border-left-width: 3px;
   border-radius: var(--radius-md);
   background: var(--danger-soft);
   color: var(--text);
@@ -637,24 +731,57 @@
 }
 
 .job__actions {
+  grid-area: actions;
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
-  /* 12px card gap + 4px here: the action row sits 16px below the meters/facts/extras. */
-  margin-top: var(--space-1);
+  margin-top: var(--space-2);
 }
 
-/* Card actions are touch targets: 44px tall (WCAG 2.5.5 AAA size, Apple HIG). */
-.job__actions .btn {
-  min-height: 44px;
+/* A finished file needs no progress readouts: the status tag and the saved note say it all. */
+.job[data-state="done"] .progress,
+.job[data-state="done"] .job__stage,
+.job[data-state="done"] .job__meters {
+  display: none;
+}
+
+/* Wide lists read like a table: file, details, status and actions share one line. */
+@container (min-width: 900px) {
+  .job {
+    grid-template-columns: 32px minmax(150px, 1fr) minmax(0, 1.5fr) 104px auto;
+    grid-template-areas:
+      "icon title meta status actions"
+      ". progress progress progress progress"
+      ". stage meters meters meters"
+      "extras extras extras extras extras";
+  }
+
+  .job__head > .chip {
+    justify-self: start;
+  }
+
+  .job__meta,
+  .job__actions {
+    margin-top: 0;
+  }
+
+  .job__actions {
+    justify-content: flex-end;
+  }
+
+  .job__stage {
+    margin-top: var(--space-1);
+  }
 }
 
 /* Progress: determinate via --p (set by job-card.js); indeterminate sweeps. */
 .progress {
   position: relative;
-  height: 8px;
+  grid-area: progress;
+  margin-top: 10px;
+  height: 6px;
   overflow: hidden;
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-sm);
   background: var(--progress-track);
 }
 
@@ -799,13 +926,14 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
-  padding: 12px 16px;
+  gap: var(--space-2) var(--space-3);
+  padding: 4px 4px 4px 12px;
   border: 1px solid var(--border);
+  border-left: 3px solid var(--success);
   border-radius: var(--radius-md);
   background: var(--surface);
   color: var(--text-muted);
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
 }
 
 .callout__text {
@@ -824,10 +952,10 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
-  padding: 12px 16px;
+  gap: var(--space-2) var(--space-3);
+  padding: 12px var(--space-3);
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-card);
   background: var(--surface);
   color: var(--text);
   font-size: 0.875rem;
@@ -837,14 +965,31 @@
   display: none;
 }
 
+/* Until a folder is chosen this is the one thing on the page that needs attention. */
 .destination[data-mode="unset"] {
   border-color: var(--accent);
+  background: var(--accent-soft);
 }
 
-.destination > .icon,
-.destination > svg {
+.destination__icon {
+  display: grid;
   flex: none;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
   color: var(--text-muted);
+}
+
+.destination[data-mode="unset"] .destination__icon,
+.destination[data-mode="folder"] .destination__icon {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.destination[data-mode="unset"] .destination__icon {
+  background: var(--surface);
 }
 
 .destination__text {
@@ -865,12 +1010,24 @@
 .destination__hint {
   margin-top: 2px;
   color: var(--text-muted);
+  font-size: 0.8125rem;
 }
 
 .destination__actions {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
+}
+
+@media (max-width: 559px) {
+  .destination__actions {
+    flex-direction: column;
+    width: 100%;
+  }
+
+  .destination__actions .btn {
+    width: 100%;
+  }
 }
 
 /* ---- toasts -------------------------------------------------------------- */

@@ -7,7 +7,7 @@
  *   setStorageInfo, privacy}
  */
 
-import { h } from "../core/dom.js";
+import { h, uid } from "../core/dom.js";
 import { icon } from "../core/icons.js";
 import { buildDiagnostics, logDiagnostics } from "../core/diagnostics.js";
 import { describeError } from "../core/errors.js";
@@ -527,6 +527,7 @@ export async function mount(container, ctx) {
   });
 
   const list = createJobList({
+    stepNumber: 3,
     onClearFinished: () => {
       queue.clearFinished();
       const active = document.activeElement;
@@ -568,13 +569,29 @@ export async function mount(container, ctx) {
     ),
   );
 
+  /** A titled section of the workflow: 1 Save location, 2 Add files (3 is the conversion list). */
+  function step(number, title, ...children) {
+    const titleId = uid("step-title-");
+    return h(
+      "section",
+      { class: "step", attrs: { "aria-labelledby": titleId } },
+      h(
+        "h2",
+        { class: "step__title", attrs: { id: titleId } },
+        h("span", { class: "step__num", attrs: { "aria-hidden": "true" } }, String(number)),
+        title,
+      ),
+      ...children,
+    );
+  }
+
   const root = h(
     "div",
     { class: "tool", dataset: { testid: "tool-mkv-to-mp4" } },
     head,
     callout,
-    destinationBar.el,
-    dropzone.el,
+    step(1, "Save location", destinationBar.el),
+    step(2, "Add files", dropzone.el),
     list.el,
   );
   applyDestination(destinationBar.state());

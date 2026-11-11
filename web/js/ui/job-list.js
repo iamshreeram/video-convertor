@@ -20,7 +20,7 @@ function firstAction(card) {
 /**
  * @param {{onClearFinished?: () => void}} [options]
  */
-export function createJobList({ onClearFinished } = {}) {
+export function createJobList({ onClearFinished, stepNumber } = {}) {
   /** @type {Map<string, HTMLElement>} */
   const cards = new Map();
   const headingId = uid("jobs-heading-");
@@ -58,7 +58,7 @@ export function createJobList({ onClearFinished } = {}) {
       h("span", { class: "empty-state__badge empty-state__badge--main" }, icon("layers", { size: 26 })),
       h("span", { class: "empty-state__badge" }, icon("video", { size: 22 })),
     ),
-    h("p", { class: "empty-state__text" }, "No files yet \u2014 add an MKV above to get started"),
+    h("p", { class: "empty-state__text" }, "No files yet. Add an MKV above and the conversion starts right away."),
   );
 
   const el = h(
@@ -70,7 +70,8 @@ export function createJobList({ onClearFinished } = {}) {
       h(
         "h2",
         { class: "job-list__title", attrs: { id: headingId } },
-        "Files",
+        ...(stepNumber ? [h("span", { class: "step__num", attrs: { "aria-hidden": "true" } }, String(stepNumber))] : []),
+        "Conversions",
         countBadge,
       ),
       clearButton,

@@ -25,15 +25,15 @@
   --space-7: 48px;
 
   /* Shape */
-  --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-card: 12px;
+  --radius-sm: 4px;
+  --radius-md: 4px;
+  --radius-card: 6px;
   --radius-pill: 999px;
 
   /* Layout */
-  --header-h: 64px;
-  --sidebar-w: 232px;
-  --content-max: 960px;
+  --header-h: 56px;
+  --sidebar-w: 248px;
+  --content-max: 1040px;
   --touch-min: 40px;
 
   /* Stacking */
@@ -46,24 +46,24 @@
   --ease-out: cubic-bezier(0.2, 0.7, 0.2, 1);
 
   /* Surfaces and text */
-  --bg: #f5f7fa;
+  --bg: #f3f5f9;
   --surface: #ffffff;
-  --surface-2: #f1f4f8;
-  --surface-3: #e7ecf3;
-  --border: #dde3ec;
-  --border-strong: #7a8496;
+  --surface-2: #f6f8fb;
+  --surface-3: #e8ecf2;
+  --border: #dbe1ea;
+  --border-strong: #7d879a;
   --text: #0f172a;
   --text-muted: #475569;
   --text-subtle: #5b6679;
   --backdrop: rgba(15, 23, 42, 0.55);
 
-  /* Accent (indigo) */
-  --accent: #4f46e5;
-  --accent-hover: #4338ca;
-  --accent-soft: #eef2ff;
-  --accent-text: #3730a3;
+  /* Accent (enterprise blue) */
+  --accent: #0f62fe;
+  --accent-hover: #0043ce;
+  --accent-soft: #edf4ff;
+  --accent-text: #0043ce;
   --on-accent: #ffffff;
-  --focus-ring: #4f46e5;
+  --focus-ring: #0f62fe;
 
   /* Semantic */
   --success: #047857;
@@ -82,10 +82,10 @@
 
   /* Progress */
   --progress-track: #e2e8f0;
-  --progress-fill: #4f46e5;
+  --progress-fill: #0f62fe;
 
   /* Elevation */
-  --shadow-1: 0 1px 2px rgba(15, 23, 42, 0.06), 0 1px 1px rgba(15, 23, 42, 0.04);
+  --shadow-1: 0 1px 2px rgba(15, 23, 42, 0.05);
   --shadow-2: 0 4px 12px rgba(15, 23, 42, 0.08), 0 1px 3px rgba(15, 23, 42, 0.06);
   --shadow-3: 0 16px 40px rgba(15, 23, 42, 0.18), 0 2px 8px rgba(15, 23, 42, 0.08);
 }
@@ -94,22 +94,22 @@
 @media (prefers-color-scheme: dark) {
   html:not([data-theme]) {
     color-scheme: dark;
-    --bg: #0b1120;
-    --surface: #121a2b;
-    --surface-2: #1a2338;
-    --surface-3: #232e46;
-    --border: #2b3750;
+    --bg: #0e131b;
+    --surface: #151b26;
+    --surface-2: #1b2331;
+    --surface-3: #242d3d;
+    --border: #2a3342;
     --border-strong: #66769a;
     --text: #e6ebf3;
     --text-muted: #b4bfd0;
     --text-subtle: #9aa6bb;
     --backdrop: rgba(2, 6, 14, 0.7);
-    --accent: #818cf8;
-    --accent-hover: #a5b4fc;
-    --accent-soft: rgba(129, 140, 248, 0.14);
-    --accent-text: #c7d2fe;
+    --accent: #78a9ff;
+    --accent-hover: #a6c8ff;
+    --accent-soft: rgba(120, 169, 255, 0.14);
+    --accent-text: #a6c8ff;
     --on-accent: #0b1120;
-    --focus-ring: #a5b4fc;
+    --focus-ring: #a6c8ff;
     --success: #6ee7b7;
     --success-soft: rgba(16, 185, 129, 0.14);
     --success-border: rgba(16, 185, 129, 0.4);
@@ -124,7 +124,7 @@
     --neutral-soft: #232e46;
     --neutral-text: #cbd5e1;
     --progress-track: #2b3750;
-    --progress-fill: #818cf8;
+    --progress-fill: #78a9ff;
     --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
     --shadow-2: 0 4px 12px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.35);
     --shadow-3: 0 16px 40px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.4);
@@ -134,22 +134,22 @@
 /* Explicit dark (theme toggle). */
 html[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #0b1120;
-  --surface: #121a2b;
-  --surface-2: #1a2338;
-  --surface-3: #232e46;
-  --border: #2b3750;
+  --bg: #0e131b;
+  --surface: #151b26;
+  --surface-2: #1b2331;
+  --surface-3: #242d3d;
+  --border: #2a3342;
   --border-strong: #66769a;
   --text: #e6ebf3;
   --text-muted: #b4bfd0;
   --text-subtle: #9aa6bb;
   --backdrop: rgba(2, 6, 14, 0.7);
-  --accent: #818cf8;
-  --accent-hover: #a5b4fc;
-  --accent-soft: rgba(129, 140, 248, 0.14);
-  --accent-text: #c7d2fe;
+  --accent: #78a9ff;
+  --accent-hover: #a6c8ff;
+  --accent-soft: rgba(120, 169, 255, 0.14);
+  --accent-text: #a6c8ff;
   --on-accent: #0b1120;
-  --focus-ring: #a5b4fc;
+  --focus-ring: #a6c8ff;
   --success: #6ee7b7;
   --success-soft: rgba(16, 185, 129, 0.14);
   --success-border: rgba(16, 185, 129, 0.4);
@@ -164,7 +164,7 @@ html[data-theme="dark"] {
   --neutral-soft: #232e46;
   --neutral-text: #cbd5e1;
   --progress-track: #2b3750;
-  --progress-fill: #818cf8;
+  --progress-fill: #78a9ff;
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-2: 0 4px 12px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.35);
   --shadow-3: 0 16px 40px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.4);
