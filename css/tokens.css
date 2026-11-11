@@ -1,0 +1,177 @@
+/*
+ * Design tokens: the ONLY place colours are defined. Light values live on :root;
+ * dark values live under html[data-theme="dark"], which theme-init.js (first paint)
+ * and theme.js (runtime) set. The single media query is a fallback for the window
+ * before any script runs: it applies dark tokens only when no data-theme is set.
+ * Component CSS must use these tokens and never carry its own colour scheme rules.
+ * Text/background pairs meet WCAG AA (4.5:1); UI borders meet 3:1.
+ * Theme changes are atomic: no component transitions colour tokens (see components.css).
+ */
+
+:root {
+  color-scheme: light;
+
+  /* Type */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+
+  /* 8px grid */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 16px;
+  --space-4: 24px;
+  --space-5: 32px;
+  --space-6: 40px;
+  --space-7: 48px;
+
+  /* Shape */
+  --radius-sm: 4px;
+  --radius-md: 4px;
+  --radius-card: 6px;
+  --radius-pill: 999px;
+
+  /* Layout */
+  --header-h: 56px;
+  --sidebar-w: 248px;
+  --content-max: 1040px;
+  --touch-min: 40px;
+
+  /* Stacking */
+  --z-header: 20;
+  --z-toast: 60;
+
+  /* Motion */
+  --dur-fast: 120ms;
+  --dur-base: 220ms;
+  --ease-out: cubic-bezier(0.2, 0.7, 0.2, 1);
+
+  /* Surfaces and text */
+  --bg: #f3f5f9;
+  --surface: #ffffff;
+  --surface-2: #f6f8fb;
+  --surface-3: #e8ecf2;
+  --border: #dbe1ea;
+  --border-strong: #7d879a;
+  --text: #0f172a;
+  --text-muted: #475569;
+  --text-subtle: #5b6679;
+  --backdrop: rgba(15, 23, 42, 0.55);
+
+  /* Accent (enterprise blue) */
+  --accent: #0f62fe;
+  --accent-hover: #0043ce;
+  --accent-soft: #edf4ff;
+  --accent-text: #0043ce;
+  --on-accent: #ffffff;
+  --focus-ring: #0f62fe;
+
+  /* Semantic */
+  --success: #047857;
+  --success-soft: #ecfdf5;
+  --success-border: #a7f3d0;
+  --warning: #92400e;
+  --warning-soft: #fffbeb;
+  --warning-border: #fde68a;
+  --danger: #b91c1c;
+  --danger-hover: #991b1b;
+  --danger-soft: #fef2f2;
+  --danger-border: #fecaca;
+  --on-danger: #ffffff;
+  --neutral-soft: #eef1f5;
+  --neutral-text: #334155;
+
+  /* Progress */
+  --progress-track: #e2e8f0;
+  --progress-fill: #0f62fe;
+
+  /* Elevation */
+  --shadow-1: 0 1px 2px rgba(15, 23, 42, 0.05);
+  --shadow-2: 0 4px 12px rgba(15, 23, 42, 0.08), 0 1px 3px rgba(15, 23, 42, 0.06);
+  --shadow-3: 0 16px 40px rgba(15, 23, 42, 0.18), 0 2px 8px rgba(15, 23, 42, 0.08);
+}
+
+/* Dark palette used when the OS prefers dark and no explicit choice is applied yet. */
+@media (prefers-color-scheme: dark) {
+  html:not([data-theme]) {
+    color-scheme: dark;
+    --bg: #0e131b;
+    --surface: #151b26;
+    --surface-2: #1b2331;
+    --surface-3: #242d3d;
+    --border: #2a3342;
+    --border-strong: #66769a;
+    --text: #e6ebf3;
+    --text-muted: #b4bfd0;
+    --text-subtle: #9aa6bb;
+    --backdrop: rgba(2, 6, 14, 0.7);
+    --accent: #78a9ff;
+    --accent-hover: #a6c8ff;
+    --accent-soft: rgba(120, 169, 255, 0.14);
+    --accent-text: #a6c8ff;
+    --on-accent: #0b1120;
+    --focus-ring: #a6c8ff;
+    --success: #6ee7b7;
+    --success-soft: rgba(16, 185, 129, 0.14);
+    --success-border: rgba(16, 185, 129, 0.4);
+    --warning: #fcd34d;
+    --warning-soft: rgba(245, 158, 11, 0.12);
+    --warning-border: rgba(245, 158, 11, 0.4);
+    --danger: #fca5a5;
+    --danger-hover: #fecaca;
+    --danger-soft: rgba(239, 68, 68, 0.14);
+    --danger-border: rgba(239, 68, 68, 0.45);
+    --on-danger: #1f0a0a;
+    --neutral-soft: #232e46;
+    --neutral-text: #cbd5e1;
+    --progress-track: #2b3750;
+    --progress-fill: #78a9ff;
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-2: 0 4px 12px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.35);
+    --shadow-3: 0 16px 40px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.4);
+  }
+}
+
+/* Explicit dark (theme toggle). */
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0e131b;
+  --surface: #151b26;
+  --surface-2: #1b2331;
+  --surface-3: #242d3d;
+  --border: #2a3342;
+  --border-strong: #66769a;
+  --text: #e6ebf3;
+  --text-muted: #b4bfd0;
+  --text-subtle: #9aa6bb;
+  --backdrop: rgba(2, 6, 14, 0.7);
+  --accent: #78a9ff;
+  --accent-hover: #a6c8ff;
+  --accent-soft: rgba(120, 169, 255, 0.14);
+  --accent-text: #a6c8ff;
+  --on-accent: #0b1120;
+  --focus-ring: #a6c8ff;
+  --success: #6ee7b7;
+  --success-soft: rgba(16, 185, 129, 0.14);
+  --success-border: rgba(16, 185, 129, 0.4);
+  --warning: #fcd34d;
+  --warning-soft: rgba(245, 158, 11, 0.12);
+  --warning-border: rgba(245, 158, 11, 0.4);
+  --danger: #fca5a5;
+  --danger-hover: #fecaca;
+  --danger-soft: rgba(239, 68, 68, 0.14);
+  --danger-border: rgba(239, 68, 68, 0.45);
+  --on-danger: #1f0a0a;
+  --neutral-soft: #232e46;
+  --neutral-text: #cbd5e1;
+  --progress-track: #2b3750;
+  --progress-fill: #78a9ff;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 4px 12px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.35);
+  --shadow-3: 0 16px 40px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+/* Explicit light (theme toggle): restates the light palette so that it wins
+   over the OS-dark fallback above. */
+html[data-theme="light"] {
+  color-scheme: light;
+}
